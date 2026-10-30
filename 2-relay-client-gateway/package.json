@@ -1,0 +1,16 @@
+{
+  "name": "waa-relay-client-gateway",
+  "version": "1.0.0",
+  "description": "Local OpenAI / Gemini compatible relay gateway with real-time SSE streaming and in-memory cookie store",
+  "main": "src/relay-server.js",
+  "bin": {
+    "waa-relay": "bin/start-relay.js"
+  },
+  "scripts": {
+    "start": "node bin/start-relay.js",
+    "test": "node test/stream-verify.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

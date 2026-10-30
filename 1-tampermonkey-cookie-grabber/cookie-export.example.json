@@ -1,0 +1,50 @@
+{
+  "ok": true,
+  "authUser": 0,
+  "g1Tier": "TIER0",
+  "cookieCount": 20,
+  "httpOnlyCount": 14,
+  "cookieNames": [
+    "NID",
+    "__Secure-1PSIDTS",
+    "__Secure-3PSIDTS",
+    "SID",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+    "HSID",
+    "SSID",
+    "APISID",
+    "SAPISID",
+    "__Secure-1PAPISID",
+    "__Secure-3PAPISID",
+    "SIDCC",
+    "__Secure-1PSIDCC",
+    "__Secure-3PSIDCC",
+    "LSID",
+    "__Host-1PLSID",
+    "__Host-3PLSID",
+    "ACCOUNT_CHOOSER",
+    "__Host-GAPS"
+  ],
+  "httpOnlyNames": [
+    "NID",
+    "__Secure-1PSIDTS",
+    "__Secure-3PSIDTS",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+    "HSID",
+    "SSID",
+    "__Secure-1PSIDCC",
+    "__Secure-3PSIDCC",
+    "LSID",
+    "__Host-1PLSID",
+    "__Host-3PLSID",
+    "ACCOUNT_CHOOSER",
+    "__Host-GAPS"
+  ],
+  "errors": {
+    "aistudio": null,
+    "accounts": null
+  },
+  "cookies": "SID=YOUR_SID_HERE; HSID=YOUR_HSID_HERE; SSID=YOUR_SSID_HERE; APISID=YOUR_APISID_HERE; SAPISID=YOUR_SAPISID_HERE; __Secure-1PSID=YOUR_1PSID_HERE; __Secure-3PSID=YOUR_3PSID_HERE; __Secure-1PAPISID=YOUR_1PAPISID_HERE; __Secure-3PAPISID=YOUR_3PAPISID_HERE; __Secure-1PSIDTS=YOUR_1PSIDTS_HERE; __Secure-3PSIDTS=YOUR_3PSIDTS_HERE; SIDCC=YOUR_SIDCC_HERE; __Secure-1PSIDCC=YOUR_1PSIDCC_HERE; __Secure-3PSIDCC=YOUR_3PSIDCC_HERE; LSID=YOUR_LSID_HERE; __Host-1PLSID=YOUR_1PLSID_HERE"
+}

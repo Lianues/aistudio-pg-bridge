@@ -1,0 +1,13 @@
+node_modules/
+
+profile.json
+cookies.json
+cookies/
+*.cookie.txt
+cache/
+data/
+*.log
+.DS_Store
+
+3-waa-proof-server/*
+!3-waa-proof-server/API.md
