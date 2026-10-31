@@ -73,6 +73,30 @@ async function runTest() {
       'Transfer-Encoding': 'chunked',
     });
 
+    if (mockMode === 'image_gen') {
+      const imgPart = [
+        null,
+        null,
+        ['image/jpeg', 'FAKE_JPEG_BASE64_DATA_12345'],
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        'EtIGCs8GA_IMAGE_SIG==',
+      ];
+      res.write('[[');
+      res.write(JSON.stringify([[[[[imgPart], 'model'], 1]], null, [10, 260, 270]]));
+      res.write(']]');
+      return res.end();
+    }
+
     if (mockMode === 'parallel_tools') {
       // Simulate parallel function calls (`getWeather("Tokyo")` and `getWeather("Paris")`)
       // with thought summary + thoughtSignature attached to the first functionCall part
@@ -706,6 +730,67 @@ async function runTest() {
   assert.strictEqual(oaiToolRespTurnWire[0][0][11][2], 'call_tokyo_1');
   assert.strictEqual(oaiToolRespTurnWire[0][1][11][0], 'getWeather');
   assert.strictEqual(oaiToolRespTurnWire[0][1][11][2], 'call_paris_2');
+
+  // 10. Test Image Generation Models (`gemini-nano-banana-2.1`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`)
+  //     - Verify `/v1/models` includes `gemini-3.5-flash-lite` + 4 image models and removes `gemini-2.5-*`
+  const modelsRes = await fetch(`${relayInfo.url}/v1/models`).then((r) => r.json());
+  const modelIds = modelsRes.data.map((m) => m.id);
+  assert.ok(modelIds.includes('gemini-3.5-flash-lite'));
+  assert.ok(modelIds.includes('gemini-nano-banana-2.1'));
+  assert.ok(modelIds.includes('gemini-3.1-flash-image'));
+  assert.ok(modelIds.includes('gemini-3.1-flash-lite-image'));
+  assert.ok(modelIds.includes('gemini-3-pro-image'));
+  assert.ok(!modelIds.some((id) => id.startsWith('gemini-2.5')));
+
+  //     - Test Gemini format image response (`inlineData`) + `wire[3][14] = [1, 2]`
+  mockMode = 'image_gen';
+  const gemImgRes = await fetch(
+    `${relayInfo.url}/v1beta/models/gemini-nano-banana-2.1:generateContent`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': 'sk-test-key' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: '画一根香蕉' }] }],
+      }),
+    },
+  ).then((r) => r.json());
+  assert.strictEqual(capturedUpstreamWire[0], 'models/gemini-nano-banana-2.1');
+  assert.deepStrictEqual(capturedUpstreamWire[3][14], [1, 2]);
+  assert.strictEqual(capturedUpstreamWire[3][16], null);
+  assert.deepStrictEqual(gemImgRes.candidates[0].content.parts[0], {
+    inlineData: { mimeType: 'image/jpeg', data: 'FAKE_JPEG_BASE64_DATA_12345' },
+    thoughtSignature: 'EtIGCs8GA_IMAGE_SIG==',
+  });
+
+  //     - Test OpenAI format image response (Markdown `![image](data:image/jpeg;base64,...)`)
+  const oaiGenImgRes = await fetch(`${relayInfo.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-test-key' },
+    body: JSON.stringify({
+      model: 'gemini-3.1-flash-image',
+      messages: [{ role: 'user', content: '画一根香蕉' }],
+    }),
+  }).then((r) => r.json());
+  assert.strictEqual(capturedUpstreamWire[0], 'models/gemini-3.1-flash-image');
+  assert.deepStrictEqual(capturedUpstreamWire[3][14], [1, 2]);
+  assert.strictEqual(
+    oaiGenImgRes.choices[0].message.content,
+    '![image](data:image/jpeg;base64,FAKE_JPEG_BASE64_DATA_12345)',
+  );
+
+  // 11. Test Account Liveness Check (`POST /api/accounts/test` -> calls `models/gemini-3.5-flash-lite`)
+  mockMode = 'text_and_thought';
+  const statusList = await fetch(`${relayInfo.url}/api/status`).then((r) => r.json());
+  const firstAccId = statusList.accounts[0].accountId;
+  const testAccRes = await fetch(`${relayInfo.url}/api/accounts/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accountId: firstAccId }),
+  }).then((r) => r.json());
+  assert.strictEqual(testAccRes.ok, true);
+  assert.strictEqual(testAccRes.alive, true);
+  assert.strictEqual(testAccRes.model, 'gemini-3.5-flash-lite');
+  assert.strictEqual(capturedUpstreamWire[0], 'models/gemini-3.5-flash-lite');
 
   await relay.close();
   await new Promise((r) => mockProofServer.close(r));

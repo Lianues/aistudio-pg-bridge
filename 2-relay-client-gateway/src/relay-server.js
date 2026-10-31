@@ -834,20 +834,68 @@ function buildWireContentsFromPayload(payload = {}) {
   return wireContents;
 }
 
+function isImageGenerationModel(model) {
+  const m = String(model || '').toLowerCase();
+  return m.includes('-image') || m.includes('nano-banana') || m.includes('imagen');
+}
+
+const MODALITY_MAP = {
+  text: 1,
+  image: 2,
+  audio: 3,
+};
+
 /**
- * Build the MakerSuite `GenerationConfig` (`wire[3]`) with `thinkingConfig`
- * (`wire[3][16] = [1, budget, null, level]`) enabled by default so Google
- * returns both the plaintext thinking summary (`part[12] = 1`) and `thoughtSignature` (`part[14]`).
+ * Build the MakerSuite `GenerationConfig` (`wire[3]`):
+ *   - For standard text/reasoning models: enables `thinkingConfig` (`wire[3][16] = [1, budget, null, level]`)
+ *     by default so Google returns both the plaintext thinking summary (`part[12] = 1`) and `thoughtSignature` (`part[14]`).
+ *   - For image generation models (`gemini-nano-banana-2.1`, `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`):
+ *     sets `wire[3][14] = [1, 2]` (`responseModalities: [TEXT, IMAGE]`) and optional `imageConfig` (`wire[3][26] = [aspectRatio, imageSize]`).
  */
-function buildWireGenerationConfig(generationConfig = {}) {
+function buildWireGenerationConfig(generationConfig = {}, model = '') {
   const gc = generationConfig && typeof generationConfig === 'object' ? generationConfig : {};
   const maxTokens = gc.maxOutputTokens ?? gc.max_tokens ?? 32768;
   const temp = gc.temperature ?? 1;
   const topP = gc.topP ?? gc.top_p ?? 0.95;
   const topK = gc.topK ?? gc.top_k ?? 64;
   const mime = gc.responseMimeType ?? gc.response_mime_type ?? null;
+  const isImgModel = isImageGenerationModel(model);
+
+  let responseModalitiesWire = null;
+  const rawModalities = gc.responseModalities || gc.response_modalities;
+  if (Array.isArray(rawModalities) && rawModalities.length > 0) {
+    const mapped = rawModalities
+      .map((m) => (typeof m === 'number' ? m : MODALITY_MAP[String(m).trim().toLowerCase()]))
+      .filter(Boolean);
+    if (mapped.length > 0) responseModalitiesWire = mapped;
+  } else if (isImgModel) {
+    responseModalitiesWire = [1, 2];
+  }
+
+  const imgCfgInput = gc.imageConfig || gc.image_config || {};
+  const aspectRatio =
+    imgCfgInput.aspectRatio || imgCfgInput.aspect_ratio || gc.aspectRatio || gc.aspect_ratio || null;
+  const imageSize =
+    imgCfgInput.imageSize ||
+    imgCfgInput.image_size ||
+    imgCfgInput.outputResolution ||
+    gc.outputResolution ||
+    gc.imageSize ||
+    null;
+  const imageConfigWire =
+    aspectRatio || imageSize ? [aspectRatio ? String(aspectRatio) : null, imageSize ? String(imageSize) : null] : null;
 
   const thinkingCfgInput = gc.thinkingConfig || gc.thinking_config || {};
+  const hasExplicitThinking =
+    gc.thinkingConfig !== undefined ||
+    gc.thinking_config !== undefined ||
+    gc.thinkingLevel !== undefined ||
+    gc.thinking_level !== undefined ||
+    gc.thinkingBudget !== undefined ||
+    gc.thinking_budget !== undefined ||
+    gc.reasoningEffort !== undefined ||
+    gc.reasoning_effort !== undefined;
+
   const includeThoughts =
     thinkingCfgInput.includeThoughts !== false &&
     thinkingCfgInput.include_thoughts !== false &&
@@ -882,11 +930,14 @@ function buildWireGenerationConfig(generationConfig = {}) {
       ? rawLevel
       : THINKING_LEVEL_MAP[normLevelStr] || 3;
 
-  const thinkingWire = !isDisabled
-    ? [1, thinkingBudget, null, thinkingLevel]
-    : [null, 0, null, null];
+  const thinkingWire =
+    isImgModel && !hasExplicitThinking
+      ? null
+      : !isDisabled
+        ? [1, thinkingBudget, null, thinkingLevel]
+        : [null, 0, null, null];
 
-  return [
+  const wire = [
     null,
     null,
     null,
@@ -901,15 +952,20 @@ function buildWireGenerationConfig(generationConfig = {}) {
     null,
     null,
     1,
-    null,
+    responseModalitiesWire,
     null,
     thinkingWire,
   ];
+  if (imageConfigWire) {
+    while (wire.length < 26) wire.push(null);
+    wire[26] = imageConfigWire;
+  }
+  return wire;
 }
 
 function buildGenerateWireBody({ model, wireContents, tools, proof, generationConfig }) {
   const normModel = resolveModelAlias(model);
-  const genCfg = buildWireGenerationConfig(generationConfig);
+  const genCfg = buildWireGenerationConfig(generationConfig, normModel);
   const toolsWire = encodeToolsWire(tools);
 
   const wire = [
@@ -934,6 +990,7 @@ function parseSingleMakerSuiteFrame(frame) {
   let deltaText = '';
   let deltaThought = '';
   const functionCalls = [];
+  const inlineImages = [];
   const thoughtSignatures = [];
   const geminiParts = [];
   let finishReasonCode = null;
@@ -944,6 +1001,7 @@ function parseSingleMakerSuiteFrame(frame) {
       deltaText,
       deltaThought,
       functionCalls,
+      inlineImages,
       thoughtSignatures,
       geminiParts,
       finishReasonCode,
@@ -962,9 +1020,27 @@ function parseSingleMakerSuiteFrame(frame) {
         for (const part of parts) {
           if (!Array.isArray(part)) continue;
           const text = typeof part[1] === 'string' ? part[1] : '';
+          const inlWire = Array.isArray(part[2]) ? part[2] : null;
           const fcWire = Array.isArray(part[10]) ? part[10] : null;
           const thoughtFlag = !!part[12];
           const sig = typeof part[14] === 'string' && part[14].length > 0 ? part[14] : null;
+
+          if (inlWire && typeof inlWire[1] === 'string' && inlWire[1].length > 0) {
+            const mimeType = String(inlWire[0] || 'image/jpeg');
+            const b64Data = String(inlWire[1]);
+            const imgPart = {
+              inlineData: { mimeType, data: b64Data },
+              ...(thoughtFlag ? { thought: true } : {}),
+              ...(sig ? { thoughtSignature: sig } : {}),
+            };
+            inlineImages.push(imgPart);
+            geminiParts.push(imgPart);
+            if (!thoughtFlag) {
+              const mdImg = `![image](data:${mimeType};base64,${b64Data})`;
+              deltaText += (deltaText ? '\n\n' : '') + mdImg;
+            }
+            continue;
+          }
 
           if (fcWire) {
             const fcObj = {
@@ -1016,6 +1092,7 @@ function parseSingleMakerSuiteFrame(frame) {
     deltaText,
     deltaThought,
     functionCalls,
+    inlineImages,
     thoughtSignatures,
     geminiParts,
     finishReasonCode,
@@ -1087,7 +1164,9 @@ function parseMakerSuiteResponse(rawText) {
 
   let fullText = '';
   let thoughtText = '';
+  let rawModelText = '';
   const functionCalls = [];
+  const inlineImages = [];
   const thoughtSignatures = [];
   let finishReasonCode = 1;
   let usage = { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
@@ -1097,6 +1176,12 @@ function parseMakerSuiteResponse(rawText) {
     if (d.deltaText) fullText += d.deltaText;
     if (d.deltaThought) thoughtText += d.deltaThought;
     if (d.functionCalls.length > 0) functionCalls.push(...d.functionCalls);
+    if (d.inlineImages && d.inlineImages.length > 0) inlineImages.push(...d.inlineImages);
+    for (const gp of d.geminiParts || []) {
+      if (gp && typeof gp.text === 'string' && !gp.thought && gp.text) {
+        rawModelText += gp.text;
+      }
+    }
     if (d.thoughtSignatures.length > 0) {
       thoughtSignatures.push(...d.thoughtSignatures);
     }
@@ -1106,8 +1191,10 @@ function parseMakerSuiteResponse(rawText) {
 
   return {
     text: fullText,
+    rawModelText,
     thought: thoughtText,
     functionCalls,
+    inlineImages,
     thoughtSignatures,
     finishReasonCode,
     finishReasonName: FINISH_REASON_MAP[finishReasonCode] || 'STOP',
@@ -1177,11 +1264,18 @@ function toOpenAIChatCompletion(parsed, model) {
  */
 function toGeminiResponse(parsed, model) {
   const parts = [];
+  const hasImages = Array.isArray(parsed.inlineImages) && parsed.inlineImages.length > 0;
+  const textForGemini = hasImages ? parsed.rawModelText || '' : parsed.text || '';
   if (parsed.thought) {
     parts.push({ text: parsed.thought, thought: true });
   }
-  if (parsed.text) {
-    parts.push({ text: parsed.text });
+  if (textForGemini) {
+    parts.push({ text: textForGemini });
+  }
+  if (hasImages) {
+    for (const imgPart of parsed.inlineImages) {
+      parts.push(imgPart);
+    }
   }
   if (Array.isArray(parsed.functionCalls) && parsed.functionCalls.length > 0) {
     for (const fcItem of parsed.functionCalls) {
@@ -1801,17 +1895,82 @@ function createRelayServer(options = {}) {
         return sendJson(res, 200, { ok: true });
       }
 
+      if (req.method === 'POST' && (pathname === '/api/accounts/test' || pathname === '/v1/accounts/test')) {
+        const body = await readJsonBody(req);
+        const entry = relayClient.accountStore.accounts.get(body.accountId);
+        if (!entry) {
+          return sendJson(res, 404, { ok: false, alive: false, error: '未找到该账号' });
+        }
+        const t0 = Date.now();
+        try {
+          const testRes = await relayClient.callGenerateContent({
+            wireContents: [[[[null, '1+1=']], 'user']],
+            model: 'models/gemini-3.5-flash-lite',
+            generationConfig: {
+              maxOutputTokens: 64,
+              thinkingLevel: 'minimal',
+            },
+            cookies: entry.cookies,
+            authUser: entry.authUser,
+            g1Tier: entry.g1Tier,
+            accountId: entry.accountId,
+            fromStore: false,
+          });
+          entry.status = 'ready';
+          entry.lastError = null;
+          return sendJson(res, 200, {
+            ok: true,
+            alive: true,
+            model: 'gemini-3.5-flash-lite',
+            elapsedMs: Date.now() - t0,
+            reply: (testRes.parsed.text || '').trim().slice(0, 60),
+          });
+        } catch (err) {
+          entry.lastError = err.message;
+          return sendJson(res, 200, {
+            ok: true,
+            alive: false,
+            model: 'gemini-3.5-flash-lite',
+            elapsedMs: Date.now() - t0,
+            error: err.message,
+          });
+        }
+      }
+
+      const SUPPORTED_MODELS = [
+        { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon' },
+        { id: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash' },
+        { id: 'gemini-3.6-flash', displayName: 'Gemini 3.6 Flash' },
+        { id: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash Lite' },
+        { id: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro Preview' },
+        { id: 'gemini-nano-banana-2.1', displayName: 'Nano Banana 2.1' },
+        { id: 'gemini-3.1-flash-image', displayName: 'Nano Banana 2 (Gemini 3.1 Flash Image)' },
+        { id: 'gemini-3.1-flash-lite-image', displayName: 'Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)' },
+        { id: 'gemini-3-pro-image', displayName: 'Nano Banana Pro (Gemini 3 Pro Image)' },
+      ];
+
       if (req.method === 'GET' && pathname === '/v1/models') {
         return sendJson(res, 200, {
           object: 'list',
-          data: [
-            { id: 'gemini-4-argon', object: 'model', owned_by: 'google-aistudio' },
-            { id: 'gemini-3.8-flash', object: 'model', owned_by: 'google-aistudio' },
-            { id: 'gemini-3.6-flash', object: 'model', owned_by: 'google-aistudio' },
-            { id: 'gemini-3.1-pro-preview', object: 'model', owned_by: 'google-aistudio' },
-            { id: 'gemini-2.5-pro', object: 'model', owned_by: 'google-aistudio' },
-            { id: 'gemini-2.5-flash', object: 'model', owned_by: 'google-aistudio' },
-          ],
+          data: SUPPORTED_MODELS.map((m) => ({
+            id: m.id,
+            object: 'model',
+            owned_by: 'google-aistudio',
+          })),
+        });
+      }
+
+      if (req.method === 'GET' && (pathname === '/v1beta/models' || pathname === '/models')) {
+        return sendJson(res, 200, {
+          models: SUPPORTED_MODELS.map((m) => ({
+            name: `models/${m.id}`,
+            version: '001',
+            displayName: m.displayName,
+            description: `${m.displayName} via AI Studio Playground`,
+            inputTokenLimit: 1048576,
+            outputTokenLimit: 65536,
+            supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+          })),
         });
       }
 

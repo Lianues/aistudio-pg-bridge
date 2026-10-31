@@ -496,7 +496,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
     </div>
     <div class="kv-row">
       <span class="kv-label">支持模型:</span>
-      <code class="box">gemini-3.8-flash / gemini-4-argon（argon）/ 其他 Gemini 模型名直传</code>
+      <code class="box">gemini-4-argon / gemini-3.8-flash / gemini-3.5-flash-lite / gemini-nano-banana-2.1 / gemini-3.1-flash-image / gemini-3.1-flash-lite-image / gemini-3-pro-image</code>
     </div>
     <pre id="curl-example"></pre>
   </div>
@@ -532,6 +532,17 @@ function poolBadgeHtml(pool) {
   if (!pool) return '<span class="pill gray">未入库</span>';
   const cls = pool.state === 'hot' ? 'green' : 'amber';
   return '<span class="pill ' + cls + '" title="' + fmtRemain(pool.expiresAt) + '">' + pool.state + '</span>';
+}
+
+const testResults = {};
+
+function renderTestBadge(accountId) {
+  const r = testResults[accountId];
+  if (!r) return '';
+  if (r.loading) return '<span class="pill amber" style="margin-right:6px;font-size:11px;padding:2px 8px;">⏳ 测活中...</span>';
+  if (r.alive) return '<span class="pill green" style="margin-right:6px;font-size:11px;padding:2px 8px;">✅ 正常 (' + r.elapsedMs + 'ms)</span>';
+  const shortErr = (r.error || '未知错误').slice(0, 48).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return '<span class="pill" style="margin-right:6px;font-size:11px;padding:2px 8px;background:rgba(239,68,68,0.18);color:#fca5a5;border:1px solid rgba(239,68,68,0.4);" title="' + (r.error || '').replace(/"/g, '&quot;') + '">❌ ' + shortErr + '</span>';
 }
 
 async function refreshStatus() {
@@ -576,7 +587,11 @@ async function refreshStatus() {
           <td title="\${(a.cookieNames || []).join(', ')}">\${a.cookieCount}</td>
           <td>\${poolBadgeHtml(a.pool)}</td>
           <td>\${a.requestsCount}</td>
-          <td><button class="danger" onclick="removeAcc('\${a.accountId}')">移除</button></td>
+          <td>
+            \${renderTestBadge(a.accountId)}
+            <button class="secondary" onclick="testAcc('\${a.accountId}')" style="padding:4px 10px;font-size:12px;margin-right:6px;">⚡ 测活</button>
+            <button class="danger" onclick="removeAcc('\${a.accountId}')">移除</button>
+          </td>
         </tr>
       \`).join('');
     }
@@ -611,6 +626,28 @@ async function submitManualCookie() {
   }
   document.getElementById('manual-cookie').value = '';
   document.getElementById('manual-authuser').value = '0';
+  refreshStatus();
+}
+
+async function testAcc(accountId) {
+  testResults[accountId] = { loading: true };
+  refreshStatus();
+  try {
+    const res = await fetch('/api/accounts/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountId })
+    });
+    const data = await res.json();
+    testResults[accountId] = {
+      loading: false,
+      alive: !!data.alive,
+      elapsedMs: data.elapsedMs || 0,
+      error: data.error || ''
+    };
+  } catch (e) {
+    testResults[accountId] = { loading: false, alive: false, error: e.message };
+  }
   refreshStatus();
 }
 
