@@ -95,7 +95,9 @@ function computeAccountId(cookieMap, authUser = 0) {
 }
 
 function resolveModelAlias(modelInput, fallback = 'models/gemini-3.8-flash') {
-  const raw = String(modelInput || '').trim();
+  const raw = String(modelInput || '')
+    .trim()
+    .replace(/-(high|medium|low|minimal)$/i, '');
   if (!raw) return fallback;
   const lower = raw.toLowerCase();
   if (
@@ -679,7 +681,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
     </div>
     <div class="kv-row">
       <span class="kv-label">Models:</span>
-      <code class="box">gemini-4-argon / gemini-3.8-flash / gemini-3.5-flash-lite / gemini-nano-banana-2.1 / gemini-3.1-flash-image / gemini-3.1-flash-lite-image / gemini-3-pro-image</code>
+      <code class="box">gemini-4-argon(-high) / gemini-3.8-flash(-high) / gemini-3.5-flash-lite(-high) / gemini-nano-banana-2.1 / gemini-3.1-flash-image / gemini-3.1-flash-lite-image / gemini-3-pro-image</code>
     </div>
     <pre id="curl-example"></pre>
   </div>

@@ -910,21 +910,26 @@ function buildWireGenerationConfig(generationConfig = {}, model = '') {
     thinkingBudget = Number(thinkingBudget);
   }
 
+  const suffixMatch = String(model || '').trim().match(/-(high|medium|low|minimal)$/i);
+  const forcedLevelStr = suffixMatch ? suffixMatch[1].toLowerCase() : null;
+
   const rawLevel =
-    thinkingCfgInput.thinkingLevel ??
-    thinkingCfgInput.thinking_level ??
-    gc.thinkingLevel ??
-    gc.thinking_level ??
-    gc.reasoningEffort ??
-    gc.reasoning_effort ??
-    'high';
+    forcedLevelStr ||
+    (thinkingCfgInput.thinkingLevel ??
+      thinkingCfgInput.thinking_level ??
+      gc.thinkingLevel ??
+      gc.thinking_level ??
+      gc.reasoningEffort ??
+      gc.reasoning_effort ??
+      'high');
   const normLevelStr = String(rawLevel).trim().toLowerCase();
   const isDisabled =
-    !includeThoughts ||
-    thinkingBudget === 0 ||
-    normLevelStr === 'none' ||
-    normLevelStr === 'off' ||
-    normLevelStr === 'disabled';
+    !forcedLevelStr &&
+    (!includeThoughts ||
+      thinkingBudget === 0 ||
+      normLevelStr === 'none' ||
+      normLevelStr === 'off' ||
+      normLevelStr === 'disabled');
   const thinkingLevel =
     typeof rawLevel === 'number'
       ? rawLevel
@@ -965,7 +970,7 @@ function buildWireGenerationConfig(generationConfig = {}, model = '') {
 
 function buildGenerateWireBody({ model, wireContents, tools, proof, generationConfig }) {
   const normModel = resolveModelAlias(model);
-  const genCfg = buildWireGenerationConfig(generationConfig, normModel);
+  const genCfg = buildWireGenerationConfig(generationConfig, model || normModel);
   const toolsWire = encodeToolsWire(tools);
 
   const wire = [
@@ -1939,9 +1944,12 @@ function createRelayServer(options = {}) {
 
       const SUPPORTED_MODELS = [
         { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon' },
+        { id: 'gemini-4-argon-high', displayName: 'Gemini 4 Argon (High Thinking)' },
         { id: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash' },
+        { id: 'gemini-3.8-flash-high', displayName: 'Gemini 3.8 Flash (High Thinking)' },
         { id: 'gemini-3.6-flash', displayName: 'Gemini 3.6 Flash' },
         { id: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash Lite' },
+        { id: 'gemini-3.5-flash-lite-high', displayName: 'Gemini 3.5 Flash Lite (High Thinking)' },
         { id: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro Preview' },
         { id: 'gemini-nano-banana-2.1', displayName: 'Nano Banana 2.1' },
         { id: 'gemini-3.1-flash-image', displayName: 'Nano Banana 2 (Gemini 3.1 Flash Image)' },
