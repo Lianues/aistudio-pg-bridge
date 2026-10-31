@@ -31,6 +31,13 @@ const DEFAULT_SAFETY_SETTINGS = [
   [null, null, 10, 5],
 ];
 
+// Official Google validator bypass token (`btoa("skip_thought_signature_validator")`)
+// used when an OpenAI-compatible client replays `assistant.tool_calls` without `thoughtSignature`.
+const SKIP_THOUGHT_SIG_VALIDATOR_B64 = Buffer.from(
+  'skip_thought_signature_validator',
+  'utf8',
+).toString('base64');
+
 const FINISH_REASON_MAP = {
   0: 'FINISH_REASON_UNSPECIFIED',
   1: 'STOP',
@@ -243,11 +250,12 @@ function encodeFunctionDeclaration(fnDecl) {
 }
 
 /**
- * Encode Gemini `tools` array into MakerSuite `wire[6]` (`repeated Tool` `_.wt`).
+ * Encode Gemini `tools` or OpenAI `tools` / `functions` array into MakerSuite `wire[6]` (`repeated Tool` `_.wt`).
  */
 function encodeToolsWire(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return null;
   const wireTools = [];
+  const openAiFnDecls = [];
 
   for (const t of tools) {
     if (!t || typeof t !== 'object') continue;
@@ -261,12 +269,28 @@ function encodeToolsWire(tools) {
       if (encodedDecls.length > 0) {
         wireTools.push([null, encodedDecls]);
       }
+      continue;
+    }
+    if (t.type === 'function' && t.function && typeof t.function === 'object') {
+      openAiFnDecls.push(t.function);
+      continue;
+    }
+    if (typeof t.name === 'string') {
+      openAiFnDecls.push(t);
+      continue;
     }
     if (t.codeExecution || t.code_execution) {
       wireTools.push([[]]);
     }
     if (t.googleSearch || t.google_search) {
       wireTools.push([null, null, null, [null, [[]]]]);
+    }
+  }
+
+  if (openAiFnDecls.length > 0) {
+    const encodedOpenAiDecls = openAiFnDecls.map(encodeFunctionDeclaration).filter(Boolean);
+    if (encodedOpenAiDecls.length > 0) {
+      wireTools.push([null, encodedOpenAiDecls]);
     }
   }
 
@@ -476,17 +500,113 @@ function buildWireContentsFromPayload(payload = {}) {
     }
   }
 
-  // 2. OpenAI `messages` array (supports text + local Base64 `image_url` / `input_audio` / `file`)
+  // 2. OpenAI `messages` array (supports text + local Base64 `image_url` / `input_audio` / `file` + OpenAI `tool_calls` & `role: "tool"`)
   if (Array.isArray(payload.messages)) {
+    const toolCallIdToName = new Map();
+    let lastWasToolResponseTurn = false;
+
     for (const m of payload.messages) {
       if (!m) continue;
       const rawRole = String(m.role || 'user').toLowerCase();
-      // Convert "system" / "developer" / "tool" / "function" to "user"; "assistant" / "model" to "model"
+
+      // 2a. OpenAI `role: "tool"` or `role: "function"` -> MakerSuite `functionResponse` (`part[11]`, role `"user"`)
+      // Consecutive `role: "tool"` messages (from parallel tool calls) are merged into a single `"user"` turn.
+      if (rawRole === 'tool' || rawRole === 'function') {
+        const callId = m.tool_call_id || m.id || null;
+        const fnName =
+          m.name ||
+          m.tool_name ||
+          (callId && toolCallIdToName.get(String(callId))) ||
+          'tool_response';
+
+        let respPayload = {};
+        const inlinePartsForTool = [];
+        if (typeof m.content === 'string') {
+          const trimmed = m.content.trim();
+          if (trimmed) {
+            try {
+              const parsed = JSON.parse(trimmed);
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                respPayload = parsed;
+              } else {
+                respPayload = { result: parsed };
+              }
+            } catch {
+              respPayload = { result: m.content };
+            }
+          }
+        } else if (Array.isArray(m.content)) {
+          const textChunks = [];
+          for (const item of m.content) {
+            if (!item) continue;
+            if (typeof item === 'string') {
+              textChunks.push(item);
+              continue;
+            }
+            const itemType = String(item.type || '').toLowerCase();
+            if (itemType === 'image_url' || itemType === 'input_image') {
+              const urlOrObj = item.image_url ?? item.input_image;
+              const media = parseBase64Media(
+                typeof urlOrObj === 'string' ? urlOrObj : urlOrObj?.url || urlOrObj,
+                'image/png',
+              );
+              if (media && media.data) {
+                inlinePartsForTool.push({ inlineData: media });
+              }
+              continue;
+            }
+            const t = extractTextFromPart(item);
+            if (t) textChunks.push(t);
+          }
+          const joined = textChunks.join('\n').trim();
+          if (joined) {
+            try {
+              const parsed = JSON.parse(joined);
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                respPayload = parsed;
+              } else {
+                respPayload = { result: parsed };
+              }
+            } catch {
+              respPayload = { result: joined };
+            }
+          }
+        } else if (m.content && typeof m.content === 'object') {
+          respPayload = m.content;
+        }
+
+        const frParts = makeFunctionResponseWireParts({
+          name: String(fnName),
+          ...(callId ? { id: String(callId) } : {}),
+          response: respPayload,
+          ...(inlinePartsForTool.length > 0 ? { parts: inlinePartsForTool } : {}),
+        });
+
+        if (lastWasToolResponseTurn && wireContents.length > 0) {
+          wireContents[wireContents.length - 1][0].push(...frParts);
+        } else {
+          wireContents.push([frParts, 'user']);
+          lastWasToolResponseTurn = true;
+        }
+        continue;
+      }
+
+      lastWasToolResponseTurn = false;
+      // Convert "system" / "developer" to "user"; "assistant" / "model" to "model"
       const wireRole = rawRole === 'assistant' || rawRole === 'model' ? 'model' : 'user';
       const wireParts = [];
 
+      const rawToolCalls = Array.isArray(m.tool_calls)
+        ? m.tool_calls
+        : m.function_call && typeof m.function_call === 'object'
+          ? [{ id: m.function_call.id, type: 'function', function: m.function_call }]
+          : [];
+      const hasOpenAiToolCalls = rawToolCalls.length > 0;
+
       if (typeof m.content === 'string') {
-        wireParts.push([null, m.content]);
+        if (m.content.length > 0 || !hasOpenAiToolCalls) {
+          wireParts.push([null, m.content]);
+        }
       } else if (Array.isArray(m.content)) {
         for (const item of m.content) {
           if (!item) continue;
@@ -536,6 +656,61 @@ function buildWireContentsFromPayload(payload = {}) {
       } else if (m.content && typeof m.content === 'object') {
         const t = extractTextFromPart(m.content);
         if (t) wireParts.push([null, t]);
+      }
+
+      if (hasOpenAiToolCalls) {
+        const hasMsgLevelSigList =
+          Array.isArray(m.thoughtSignatures) && m.thoughtSignatures.length > 0;
+        for (let idx = 0; idx < rawToolCalls.length; idx += 1) {
+          const tc = rawToolCalls[idx];
+          if (!tc || typeof tc !== 'object') continue;
+          const fn = tc.function && typeof tc.function === 'object' ? tc.function : tc;
+          const fnName = String(fn.name || '');
+          const tcId = tc.id ? String(tc.id) : null;
+          if (tcId && fnName) {
+            toolCallIdToName.set(tcId, fnName);
+          }
+          let parsedArgs = {};
+          const rawArgs = fn.arguments ?? fn.args;
+          if (typeof rawArgs === 'string') {
+            const trimmedArgs = rawArgs.trim();
+            if (trimmedArgs) {
+              try {
+                const parsed = JSON.parse(trimmedArgs);
+                parsedArgs =
+                  parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                    ? parsed
+                    : { value: parsed };
+              } catch {
+                parsedArgs = { _raw: rawArgs };
+              }
+            }
+          } else if (rawArgs && typeof rawArgs === 'object') {
+            parsedArgs = rawArgs;
+          }
+
+          let sigToUse =
+            tc.thoughtSignature ||
+            tc.thought_signature ||
+            (idx === 0 ? m.thoughtSignature || m.thought_signature : null) ||
+            null;
+          // OpenAI format drops `thoughtSignature`: inject Google's official bypass token on the first functionCall part
+          if (!sigToUse && idx === 0 && !hasMsgLevelSigList) {
+            sigToUse = SKIP_THOUGHT_SIG_VALIDATOR_B64;
+          }
+
+          wireParts.push(
+            makeFunctionCallWirePart(
+              {
+                name: fnName,
+                args: parsedArgs,
+                ...(tcId ? { id: tcId } : {}),
+              },
+              sigToUse,
+              false,
+            ),
+          );
+        }
       }
 
       if (wireParts.length === 0 && (!Array.isArray(m.thoughtSignatures) || m.thoughtSignatures.length === 0)) {
@@ -943,11 +1118,27 @@ function parseMakerSuiteResponse(rawText) {
 /**
  * OpenAI format:
  *   - Plaintext thought summary -> `reasoning_content`
- *   - Answer text -> `content`
- *   - `thoughtSignature` is omitted (Gemini-only).
+ *   - Answer text -> `content` (`null` when `tool_calls` are present and no text was emitted)
+ *   - Function calls -> `tool_calls` (`finish_reason: "tool_calls"`)
+ *   - `thoughtSignature` is omitted (auto-bypassed via `skip_thought_signature_validator` on round-trip).
  */
 function toOpenAIChatCompletion(parsed, model) {
   const cleanModel = String(model || 'gemini-3.8-flash').replace(/^models\//, '');
+  const hasToolCalls = Array.isArray(parsed.functionCalls) && parsed.functionCalls.length > 0;
+  const toolCalls = hasToolCalls
+    ? parsed.functionCalls.map((item, idx) => {
+        const fc = item.functionCall || item;
+        return {
+          id: fc.id || `call_${crypto.randomBytes(6).toString('hex')}_${idx}`,
+          type: 'function',
+          function: {
+            name: String(fc.name || ''),
+            arguments: JSON.stringify(fc.args || {}),
+          },
+        };
+      })
+    : null;
+
   return {
     id: `chatcmpl-${crypto.randomBytes(12).toString('hex')}`,
     object: 'chat.completion',
@@ -958,10 +1149,15 @@ function toOpenAIChatCompletion(parsed, model) {
         index: 0,
         message: {
           role: 'assistant',
-          content: parsed.text,
+          content: hasToolCalls && !parsed.text ? null : parsed.text,
           ...(parsed.thought ? { reasoning_content: parsed.thought } : {}),
+          ...(toolCalls ? { tool_calls: toolCalls } : {}),
         },
-        finish_reason: parsed.finishReasonCode === 2 ? 'length' : 'stop',
+        finish_reason: hasToolCalls
+          ? 'tool_calls'
+          : parsed.finishReasonCode === 2
+            ? 'length'
+            : 'stop',
       },
     ],
     usage: {
@@ -1343,8 +1539,10 @@ class WaaRelayClient {
         extraBody.thinking_config ||
         (extraBody.google && extraBody.google.thinking_config),
     };
+    const tools = openAiBody.tools || openAiBody.functions || null;
     const res = await this.callGenerateContent({
       wireContents,
+      tools,
       model: openAiBody.model || this.defaultModel,
       generationConfig,
       cookies: authOverrides.cookies || openAiBody.cookies || this.defaultCookies,
@@ -1651,6 +1849,8 @@ function createRelayServer(options = {}) {
           let headersSent = false;
           let lastFinishReason = 'stop';
           let lastUsage = null;
+          let toolCallIndex = 0;
+          const tools = body.tools || body.functions || null;
 
           const ensureSseHeaders = (proofPkg) => {
             if (headersSent) return;
@@ -1676,6 +1876,7 @@ function createRelayServer(options = {}) {
           await relayClient.streamGenerateContent(
             {
               wireContents,
+              tools,
               model: body.model || relayClient.defaultModel,
               generationConfig,
               cookies: auth.cookies || relayClient.defaultCookies,
@@ -1684,9 +1885,9 @@ function createRelayServer(options = {}) {
               accountId: auth.accountId || null,
               fromStore: !!auth.fromStore,
             },
-            ({ deltaText, deltaThought, finishReasonCode, usage }) => {
+            ({ deltaText, deltaThought, functionCalls, finishReasonCode, usage }) => {
               ensureSseHeaders();
-              if (finishReasonCode === 2) lastFinishReason = 'length';
+              if (finishReasonCode === 2 && toolCallIndex === 0) lastFinishReason = 'length';
               if (usage) lastUsage = usage;
 
               if (deltaThought) {
@@ -1721,6 +1922,37 @@ function createRelayServer(options = {}) {
                   ],
                 };
                 res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+              }
+
+              if (Array.isArray(functionCalls) && functionCalls.length > 0) {
+                lastFinishReason = 'tool_calls';
+                const deltaToolCalls = functionCalls.map((item) => {
+                  const fc = item.functionCall || item;
+                  const idx = toolCallIndex++;
+                  return {
+                    index: idx,
+                    id: fc.id || `call_${crypto.randomBytes(6).toString('hex')}_${idx}`,
+                    type: 'function',
+                    function: {
+                      name: String(fc.name || ''),
+                      arguments: JSON.stringify(fc.args || {}),
+                    },
+                  };
+                });
+                const toolChunk = {
+                  id: streamId,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model: cleanModel,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: { tool_calls: deltaToolCalls },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                res.write(`data: ${JSON.stringify(toolChunk)}\n\n`);
               }
             },
           );

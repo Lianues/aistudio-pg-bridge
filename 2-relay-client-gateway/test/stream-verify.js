@@ -594,6 +594,119 @@ async function runTest() {
     'user',
   ]);
 
+  // 10. Test OpenAI Tool Calling (Non-Streaming `message.tool_calls` + Streaming `delta.tool_calls` + Multi-Turn `role: "tool"` Replay without `thoughtSignature`)
+  mockMode = 'parallel_tools';
+  const oaiTools = [
+    {
+      type: 'function',
+      function: {
+        name: 'getWeather',
+        description: 'Get weather in a city',
+        parameters: {
+          type: 'object',
+          properties: {
+            city: { type: 'string', description: 'City name' },
+          },
+          required: ['city'],
+        },
+      },
+    },
+  ];
+  const oaiFcTurn1Res = await fetch(`${relayInfo.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer sk-test-key',
+    },
+    body: JSON.stringify({
+      model: 'gemini-4-argon',
+      tools: oaiTools,
+      messages: [{ role: 'user', content: '东京和巴黎天气如何？' }],
+    }),
+  });
+  assert.strictEqual(oaiFcTurn1Res.status, 200);
+  const oaiFcTurn1 = await oaiFcTurn1Res.json();
+  console.log('[OpenAI Parallel tool_calls Response]:', JSON.stringify(oaiFcTurn1.choices[0]));
+  assert.strictEqual(oaiFcTurn1.choices[0].finish_reason, 'tool_calls');
+  assert.strictEqual(oaiFcTurn1.choices[0].message.content, null);
+  assert.strictEqual(oaiFcTurn1.choices[0].message.tool_calls.length, 2);
+  assert.deepStrictEqual(oaiFcTurn1.choices[0].message.tool_calls[0], {
+    id: 'call_tokyo_1',
+    type: 'function',
+    function: {
+      name: 'getWeather',
+      arguments: JSON.stringify({ city: 'Tokyo' }),
+    },
+  });
+
+  // Streaming OpenAI tool_calls (`delta.tool_calls`)
+  const oaiStreamToolRes = await fetch(`${relayInfo.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer sk-test-key',
+    },
+    body: JSON.stringify({
+      model: 'gemini-4-argon',
+      stream: true,
+      tools: oaiTools,
+      messages: [{ role: 'user', content: '东京和巴黎天气如何？' }],
+    }),
+  });
+  const oaiStreamToolText = await oaiStreamToolRes.text();
+  assert.ok(oaiStreamToolText.includes('"tool_calls"'));
+  assert.ok(oaiStreamToolText.includes('"finish_reason":"tool_calls"'));
+
+  // Turn 2: Client replays OpenAI `assistant` message with `tool_calls` (NO thoughtSignature!) + two `role: "tool"` messages
+  mockMode = 'text_and_thought';
+  const oaiFcTurn2Res = await fetch(`${relayInfo.url}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer sk-test-key',
+    },
+    body: JSON.stringify({
+      model: 'gemini-4-argon',
+      tools: oaiTools,
+      messages: [
+        { role: 'user', content: '东京和巴黎天气如何？' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: oaiFcTurn1.choices[0].message.tool_calls,
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_tokyo_1',
+          content: JSON.stringify({ temp: 22, condition: 'Sunny' }),
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_paris_2',
+          content: JSON.stringify({ temp: 16, condition: 'Rainy' }),
+        },
+      ],
+    }),
+  });
+  assert.strictEqual(oaiFcTurn2Res.status, 200);
+  const oaiModelTurnWire = capturedUpstreamWire[1][1];
+  const oaiToolRespTurnWire = capturedUpstreamWire[1][2];
+  assert.strictEqual(oaiModelTurnWire[1], 'model');
+  assert.strictEqual(oaiModelTurnWire[0].length, 2);
+  // First functionCall part automatically carries `btoa("skip_thought_signature_validator")` at index 14!
+  assert.strictEqual(
+    oaiModelTurnWire[0][0][14],
+    Buffer.from('skip_thought_signature_validator', 'utf8').toString('base64'),
+  );
+  assert.strictEqual(oaiModelTurnWire[0][1].length, 11);
+  // Consecutive `role: "tool"` messages are merged into a single `"user"` turn with 2 functionResponse parts
+  assert.strictEqual(oaiToolRespTurnWire[1], 'user');
+  assert.strictEqual(oaiToolRespTurnWire[0].length, 2);
+  assert.strictEqual(oaiToolRespTurnWire[0][0][11][0], 'getWeather');
+  assert.strictEqual(oaiToolRespTurnWire[0][0][11][2], 'call_tokyo_1');
+  assert.strictEqual(oaiToolRespTurnWire[0][1][11][0], 'getWeather');
+  assert.strictEqual(oaiToolRespTurnWire[0][1][11][2], 'call_paris_2');
+
   await relay.close();
   await new Promise((r) => mockProofServer.close(r));
   await new Promise((r) => mockGoogleUpstream.close(r));
