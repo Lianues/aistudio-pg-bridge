@@ -40,11 +40,23 @@ const FINISH_REASON_MAP = {
   5: 'OTHER',
 };
 
+/**
+ * AI Studio `ThinkingConfig.thinking_level` (`_.Os.prototype.Xn` / `gGb` in `b0.patched.js`,
+ * and `JUg` / `i9e` / `_.Dvf` in `b3.js`):
+ *   - 1 = LOW     ("Optimizes for latency")
+ *   - 2 = MEDIUM  ("A balanced choice for general purpose use and solid quality")
+ *   - 3 = HIGH    ("(Recommended) Maximizes reasoning depth")
+ *   - 4 = MINIMAL ("Optimized for fastest response and lowest cost")
+ */
 const THINKING_LEVEL_MAP = {
-  minimal: 1,
+  low: 1,
+  thinking_level_low: 1,
   medium: 2,
-  low: 3,
-  high: 4,
+  thinking_level_medium: 2,
+  high: 3,
+  thinking_level_high: 3,
+  minimal: 4,
+  thinking_level_minimal: 4,
 };
 
 const AISTUDIO_ORIGIN = 'https://aistudio.google.com';
@@ -678,15 +690,24 @@ function buildWireGenerationConfig(generationConfig = {}) {
   const rawLevel =
     thinkingCfgInput.thinkingLevel ??
     thinkingCfgInput.thinking_level ??
+    gc.thinkingLevel ??
+    gc.thinking_level ??
     gc.reasoningEffort ??
     gc.reasoning_effort ??
-    'medium';
+    'high';
+  const normLevelStr = String(rawLevel).trim().toLowerCase();
+  const isDisabled =
+    !includeThoughts ||
+    thinkingBudget === 0 ||
+    normLevelStr === 'none' ||
+    normLevelStr === 'off' ||
+    normLevelStr === 'disabled';
   const thinkingLevel =
     typeof rawLevel === 'number'
       ? rawLevel
-      : THINKING_LEVEL_MAP[String(rawLevel).toLowerCase()] || 2;
+      : THINKING_LEVEL_MAP[normLevelStr] || 3;
 
-  const thinkingWire = includeThoughts
+  const thinkingWire = !isDisabled
     ? [1, thinkingBudget, null, thinkingLevel]
     : [null, 0, null, null];
 
@@ -1103,9 +1124,9 @@ class WaaRelayClient {
     const state =
       retryState || {
         tried: new Set(accountId ? [accountId] : []),
+        rotatedAccounts: new Set(),
         fromStore: !!fromStore,
         maxAttempts: fromStore && accountId ? Math.min(this.accountStore.countReady(), 3) : 1,
-        rotatedRetry: false,
       };
 
     const proofPkg = await this.requestProof({
@@ -1122,6 +1143,7 @@ class WaaRelayClient {
     const minimal = extractMinimalCookies(cookies || this.defaultCookies);
     const auth = {
       cookies: minimal.header,
+      rpcCookies: toCookieHeader(minimal.map, { includeAccountHost: false }),
       authorization: buildAuthorization(minimal.map, this.origin),
       googleApiKey: this.googleApiKey,
       authUser: authUser ?? this.defaultAuthUser,
@@ -1145,7 +1167,7 @@ class WaaRelayClient {
       'x-goog-authuser': String(auth.authUser ?? 0),
       'x-goog-ext-519733851-bin': 'CAASAUIwATgEQABQBFgDYgJKUHAAeAGQAQCYAQE=',
       authorization: auth.authorization,
-      cookie: auth.cookies,
+      cookie: auth.rpcCookies || auth.cookies,
       origin: auth.origin || this.origin,
       referer: (auth.origin || this.origin) + '/',
       'user-agent': this.userAgent,
@@ -1190,20 +1212,29 @@ class WaaRelayClient {
         (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500);
 
       if (isRetryable) {
-        // Auth failures: refresh this account's cookies first (best effort),
-        // so the store keeps the freshest copy even if we move on.
-        const rotated =
-          res.status === 401 || res.status === 403
-            ? await this.rotateAccountCookies(auth.cookies, auth.authUser)
-            : null;
+        // Only rotate cookies on 401 (never on 403 permission errors, which
+        // would trigger Google's high-frequency RotateCookies rate limit).
+        // When rotation succeeds, immediately retry the CURRENT account in-place
+        // with the freshly rotated cookies BEFORE failing over to the next account!
+        const rotateKey = accountId || 'default';
+        if (res.status === 401 && !state.rotatedAccounts.has(rotateKey)) {
+          state.rotatedAccounts.add(rotateKey);
+          const rotated = await this.rotateAccountCookies(auth.cookies, auth.authUser);
+          if (rotated) {
+            return this.openGenerateStream(
+              {
+                ...params,
+                wireContents: resolvedWireContents,
+                model: targetModel,
+                cookies: rotated,
+              },
+              state,
+            );
+          }
+        }
 
         const switched = this.retryWithNextAccount(state, params, resolvedWireContents, targetModel);
         if (switched) return switched;
-
-        if (rotated && !state.rotatedRetry) {
-          state.rotatedRetry = true;
-          return this.openGenerateStream({ ...params, cookies: rotated }, state);
-        }
       }
 
       const err = new Error(`Google GenerateContent HTTP ${res.status}: ${rawText.slice(0, 240)}`);
@@ -1292,12 +1323,25 @@ class WaaRelayClient {
 
   async chatCompletions(openAiBody = {}, authOverrides = {}) {
     const wireContents = buildWireContentsFromPayload(openAiBody);
+    const extraBody =
+      openAiBody.extra_body && typeof openAiBody.extra_body === 'object'
+        ? openAiBody.extra_body
+        : {};
     const generationConfig = {
+      ...(openAiBody.generationConfig || openAiBody.generation_config || {}),
       temperature: openAiBody.temperature,
       topP: openAiBody.top_p,
       maxOutputTokens: openAiBody.max_tokens ?? openAiBody.max_completion_tokens,
-      reasoningEffort: openAiBody.reasoning_effort,
-      thinkingConfig: openAiBody.thinking_config,
+      reasoningEffort:
+        openAiBody.reasoning_effort ??
+        openAiBody.reasoningEffort ??
+        (openAiBody.reasoning && openAiBody.reasoning.effort) ??
+        extraBody.reasoning_effort,
+      thinkingConfig:
+        openAiBody.thinking_config ||
+        openAiBody.thinkingConfig ||
+        extraBody.thinking_config ||
+        (extraBody.google && extraBody.google.thinking_config),
     };
     const res = await this.callGenerateContent({
       wireContents,
@@ -1325,7 +1369,15 @@ class WaaRelayClient {
 
   async geminiGenerateContent(geminiBody = {}, model, authOverrides = {}) {
     const wireContents = buildWireContentsFromPayload(geminiBody);
-    const generationConfig = geminiBody.generationConfig || {};
+    const generationConfig = {
+      ...(geminiBody.generationConfig || geminiBody.generation_config || {}),
+      ...(geminiBody.thinkingConfig || geminiBody.thinking_config
+        ? { thinkingConfig: geminiBody.thinkingConfig || geminiBody.thinking_config }
+        : {}),
+      ...(geminiBody.reasoning_effort || geminiBody.reasoningEffort
+        ? { reasoningEffort: geminiBody.reasoning_effort || geminiBody.reasoningEffort }
+        : {}),
+    };
     const tools = geminiBody.tools || null;
     const res = await this.callGenerateContent({
       wireContents,
@@ -1575,12 +1627,22 @@ function createRelayServer(options = {}) {
 
         if (body.stream) {
           const wireContents = buildWireContentsFromPayload(body);
+          const extraBody = body.extra_body && typeof body.extra_body === 'object' ? body.extra_body : {};
           const generationConfig = {
+            ...(body.generationConfig || body.generation_config || {}),
             temperature: body.temperature,
             topP: body.top_p,
             maxOutputTokens: body.max_tokens ?? body.max_completion_tokens,
-            reasoningEffort: body.reasoning_effort,
-            thinkingConfig: body.thinking_config,
+            reasoningEffort:
+              body.reasoning_effort ??
+              body.reasoningEffort ??
+              (body.reasoning && body.reasoning.effort) ??
+              extraBody.reasoning_effort,
+            thinkingConfig:
+              body.thinking_config ||
+              body.thinkingConfig ||
+              extraBody.thinking_config ||
+              (extraBody.google && extraBody.google.thinking_config),
           };
           const cleanModel = String(body.model || relayClient.defaultModel).replace(/^models\//, '');
           const streamId = `chatcmpl-${crypto.randomBytes(12).toString('hex')}`;
@@ -1706,7 +1768,15 @@ function createRelayServer(options = {}) {
 
         if (action === 'streamGenerateContent') {
           const wireContents = buildWireContentsFromPayload(body);
-          const generationConfig = body.generationConfig || {};
+          const generationConfig = {
+            ...(body.generationConfig || body.generation_config || {}),
+            ...(body.thinkingConfig || body.thinking_config
+              ? { thinkingConfig: body.thinkingConfig || body.thinking_config }
+              : {}),
+            ...(body.reasoning_effort || body.reasoningEffort
+              ? { reasoningEffort: body.reasoning_effort || body.reasoningEffort }
+              : {}),
+          };
           const tools = body.tools || null;
           const cleanModel = String(model || relayClient.defaultModel).replace(/^models\//, '');
           res.writeHead(200, {
@@ -1726,6 +1796,8 @@ function createRelayServer(options = {}) {
               cookies: auth.cookies || relayClient.defaultCookies,
               authUser: auth.authUser ?? relayClient.defaultAuthUser,
               g1Tier: auth.g1Tier,
+              accountId: auth.accountId || null,
+              fromStore: !!auth.fromStore,
             },
             ({ geminiParts, finishReasonCode, usage }) => {
               if ((!geminiParts || geminiParts.length === 0) && !usage) return;

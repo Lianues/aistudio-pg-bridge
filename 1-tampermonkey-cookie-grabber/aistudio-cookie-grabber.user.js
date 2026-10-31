@@ -7,6 +7,8 @@
 // @match        https://accounts.google.com/*
 // @connect      127.0.0.1
 // @connect      localhost
+// @connect      alkalimakersuite-pa.clients6.google.com
+// @connect      accounts.google.com
 // @grant        GM_cookie
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
@@ -19,6 +21,18 @@
   'use strict';
 
   const DEFAULT_LOCAL_RELAY = 'http://127.0.0.1:18802';
+  const AISTUDIO_ORIGIN = 'https://aistudio.google.com';
+  const BENEFIT_TIER_URL =
+    'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GetAiStudioBenefitTier';
+  const DEFAULT_AISTUDIO_KEY = ['AIzaSyB5A', 'baa22215c26f', 'B878F596c003', 'b06f2c'].join('');
+
+  const ACCOUNT_HOST_ONLY = new Set([
+    'LSID',
+    '__Host-1PLSID',
+    '__Host-3PLSID',
+    '__Host-GAPS',
+    'ACCOUNT_CHOOSER',
+  ]);
 
   const WHITELIST = new Set([
     'SID',
@@ -86,23 +100,130 @@
     let authUser = capturedMeta.authUser;
     if (authUser === null || Number.isNaN(authUser)) {
       const uMatch =
-        location.pathname.match(/\/u\/(\d+)\//) ||
+        location.pathname.match(/\/u\/(\d+)(?:\/|$)/) ||
         location.search.match(/[?&]authuser=(\d+)/i);
       authUser = uMatch ? Number(uMatch[1]) : 0;
     }
 
     let tier = capturedMeta.g1Tier;
-    if (!tier) {
+    if (!tier && location.hostname === 'aistudio.google.com') {
       try {
         const bodyText = document.body ? document.body.innerText : '';
-        if (/\bULTRA\b/.test(bodyText)) tier = 'TIER2';
+        if (/\bULTRA\b/i.test(bodyText)) tier = 'TIER2';
         else if (/\bPRO\b/.test(bodyText)) tier = 'TIER1';
       } catch {}
     }
 
     return {
       authUser,
-      g1Tier: tier || 'TIER0',
+      g1Tier: tier || null,
+    };
+  }
+
+  async function sha1Hex(str) {
+    const buf = new TextEncoder().encode(str);
+    const digest = await crypto.subtle.digest('SHA-1', buf);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  async function buildAuthorizationHeader(cookieMap, origin = AISTUDIO_ORIGIN) {
+    const sapisid =
+      cookieMap.get('SAPISID') || cookieMap.get('__Secure-3PAPISID') || cookieMap.get('APISID');
+    if (!sapisid) return '';
+    const ts = Math.floor(Date.now() / 1000);
+    const parts = [`SAPISIDHASH ${ts}_${await sha1Hex(`${ts} ${sapisid} ${origin}`)}`];
+    const one = cookieMap.get('__Secure-1PAPISID');
+    if (one) parts.push(`SAPISID1PHASH ${ts}_${await sha1Hex(`${ts} ${one} ${origin}`)}`);
+    const three = cookieMap.get('__Secure-3PAPISID');
+    if (three && three !== sapisid) {
+      parts.push(`SAPISID3PHASH ${ts}_${await sha1Hex(`${ts} ${three} ${origin}`)}`);
+    }
+    return parts.join(' ');
+  }
+
+  function probeBenefitTierOnce(cookieMap, authUser) {
+    return new Promise(async (resolve) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        return resolve({ ok: false, status: 0, g1Tier: null });
+      }
+      try {
+        const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const apiKey =
+          (win && win.WIZ_global_data && win.WIZ_global_data.PeqOQb) || DEFAULT_AISTUDIO_KEY;
+        const authHeader = await buildAuthorizationHeader(cookieMap, AISTUDIO_ORIGIN);
+        const rpcCookies = Array.from(cookieMap.entries())
+          .filter(([k]) => !ACCOUNT_HOST_ONLY.has(k))
+          .map(([k, v]) => `${k}=${v}`)
+          .join('; ');
+
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: BENEFIT_TIER_URL,
+          timeout: 4000,
+          headers: {
+            'Content-Type': 'application/json+protobuf',
+            'X-User-Agent': 'grpc-web-javascript/0.1',
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-AuthUser': String(authUser ?? 0),
+            Authorization: authHeader,
+            Cookie: rpcCookies,
+            Origin: AISTUDIO_ORIGIN,
+            Referer: `${AISTUDIO_ORIGIN}/`,
+          },
+          data: '[]',
+          onload: (res) => {
+            if (res.status === 200) {
+              try {
+                const arr = JSON.parse(res.responseText);
+                const code = Array.isArray(arr) ? arr[0] : 0;
+                const g1Tier = code === 1 ? 'TIER1' : code === 2 ? 'TIER2' : 'TIER0';
+                return resolve({ ok: true, status: 200, g1Tier });
+              } catch {}
+            }
+            resolve({ ok: false, status: res.status || 0, g1Tier: null });
+          },
+          onerror: () => resolve({ ok: false, status: 0, g1Tier: null }),
+          ontimeout: () => resolve({ ok: false, status: 0, g1Tier: null }),
+        });
+      } catch {
+        resolve({ ok: false, status: 0, g1Tier: null });
+      }
+    });
+  }
+
+  /**
+   * Actively verify `authUser` and `g1Tier` against `GetAiStudioBenefitTier`
+   * so the exported JSON always carries the exact `TIER0`/`TIER1`/`TIER2` and
+   * a valid `authUser` (falling back to `0` if a stale `/u/N` index returns 401).
+   */
+  async function verifyUserAndTier(cookieMap, initialMeta) {
+    let authUser = Number(initialMeta.authUser ?? 0);
+    let g1Tier = initialMeta.g1Tier || null;
+
+    const first = await probeBenefitTierOnce(cookieMap, authUser);
+    if (first.ok && first.g1Tier) {
+      capturedMeta.authUser = authUser;
+      capturedMeta.g1Tier = first.g1Tier;
+      return { authUser, g1Tier: first.g1Tier, verified: true };
+    }
+
+    // If non-zero authUser returned 401, probe authUser = 0 automatically
+    if (first.status === 401 && authUser !== 0) {
+      const zeroProbe = await probeBenefitTierOnce(cookieMap, 0);
+      if (zeroProbe.ok && zeroProbe.g1Tier) {
+        authUser = 0;
+        capturedMeta.authUser = 0;
+        capturedMeta.g1Tier = zeroProbe.g1Tier;
+        return { authUser: 0, g1Tier: zeroProbe.g1Tier, verified: true };
+      }
+    }
+
+    return {
+      authUser,
+      g1Tier: g1Tier || 'TIER0',
+      verified: false,
     };
   }
 
@@ -142,11 +263,17 @@
       .map(([k, v]) => `${k}=${v}`)
       .join('; ');
 
-    const meta = detectUserMetaFromPage();
+    const pageMeta = detectUserMetaFromPage();
+    const verifiedMeta = await verifyUserAndTier(mergedMap, pageMeta);
+    const hasLsid =
+      mergedMap.has('LSID') || mergedMap.has('__Host-1PLSID') || mergedMap.has('__Host-3PLSID');
+
     return {
-      ok: mergedMap.size > 0 && httpOnlyNames.length > 0,
-      authUser: meta.authUser,
-      g1Tier: meta.g1Tier,
+      ok: mergedMap.size > 0 && httpOnlyNames.length > 0 && hasLsid,
+      authUser: verifiedMeta.authUser,
+      g1Tier: verifiedMeta.g1Tier,
+      tierVerified: verifiedMeta.verified,
+      hasLsid,
       cookieCount: mergedMap.size,
       httpOnlyCount: httpOnlyNames.length,
       cookieNames: Array.from(mergedMap.keys()),
@@ -243,12 +370,14 @@
     ].join(';');
 
     btnCopy.onclick = async () => {
-      btnCopy.textContent = '⏳ 正在读取 HttpOnly Cookie...';
+      btnCopy.textContent = '⏳ 正在读取 Cookie 并校验 Pro 等级...';
       const res = await grabAllAndCopyToClipboard();
       if (res.ok) {
         btnCopy.textContent = `✅ 已复制 (${res.cookieCount}项 / HttpOnly:${res.httpOnlyCount} / u=${res.authUser} / ${res.g1Tier})`;
-      } else {
+      } else if (res.httpOnlyCount === 0) {
         btnCopy.textContent = `❌ 缺少 HttpOnly (仅${res.cookieCount}项) - 请在油猴开启 All Cookie 权限`;
+      } else if (!res.hasLsid) {
+        btnCopy.textContent = `⚠️ 缺少 LSID (仅${res.cookieCount}项) - 请确认已登录 accounts.google.com`;
       }
     };
 

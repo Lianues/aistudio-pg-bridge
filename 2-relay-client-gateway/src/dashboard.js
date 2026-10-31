@@ -188,26 +188,37 @@ class RelayAccountStore {
     let jsonTier = null;
 
     if (rawInput && typeof rawInput === 'object' && typeof rawInput.cookies === 'string') {
-      text = rawInput.cookies;
+      text = rawInput.cookies.trim();
       if (rawInput.authUser !== undefined && rawInput.authUser !== null) {
         jsonAuthUser = Number(rawInput.authUser);
       }
-      if (rawInput.g1Tier) jsonTier = String(rawInput.g1Tier);
+      if (rawInput.g1Tier) jsonTier = String(rawInput.g1Tier).trim().toUpperCase();
     } else {
       text = String(rawInput || '').trim();
-      if (text.startsWith('{')) {
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed && typeof parsed.cookies === 'string') {
-            text = parsed.cookies;
-            if (parsed.authUser !== undefined && parsed.authUser !== null) {
-              jsonAuthUser = Number(parsed.authUser);
-            }
-            if (parsed.g1Tier) jsonTier = String(parsed.g1Tier);
-          }
-        } catch {}
-      }
     }
+
+    // Unwrap nested JSON string (e.g., when Dashboard submits `{ cookies: "<Tampermonkey JSON>", authUser: 0 }`)
+    if (text.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed.cookies === 'string') {
+          text = parsed.cookies.trim();
+          if (parsed.authUser !== undefined && parsed.authUser !== null) {
+            jsonAuthUser = Number(parsed.authUser);
+          }
+          if (parsed.g1Tier) {
+            jsonTier = String(parsed.g1Tier).trim().toUpperCase();
+          }
+        }
+      } catch {}
+    }
+
+    const rawTextForHeaders =
+      typeof rawInput === 'string'
+        ? rawInput
+        : rawInput && typeof rawInput.cookies === 'string'
+          ? rawInput.cookies
+          : text;
 
     const curlCookieMatch =
       text.match(/(?:-H|--header)\s+['"]cookie:\s*([^'"]+)['"]/i) ||
@@ -216,17 +227,19 @@ class RelayAccountStore {
       text = curlCookieMatch[1];
     }
 
-    const authUserMatch = String(rawInput || '').match(
+    const authUserMatch = String(rawTextForHeaders || '').match(
       /(?:-H|--header)\s+['"]x-goog-authuser:\s*(\d+)['"]/i,
     );
+    const tierHeaderMatch = String(rawTextForHeaders || '').match(
+      /(?:-H|--header)\s+['"]x-aistudio-g1-tier:\s*(TIER\d+)['"]/i,
+    );
+
     const resolvedAuthUser =
-      jsonAuthUser !== null
+      jsonAuthUser !== null && !Number.isNaN(jsonAuthUser)
         ? jsonAuthUser
         : authUserMatch
           ? Number(authUserMatch[1])
           : Number(authUser ?? 0);
-
-    const resolvedTier = jsonTier || g1Tier || 'TIER0';
 
     const min = extractMinimalCookies(text);
     if (
@@ -239,6 +252,12 @@ class RelayAccountStore {
     const accountId = computeAccountId(min.map, resolvedAuthUser);
     const now = Date.now();
     const existing = this.accounts.get(accountId);
+    const resolvedTier =
+      jsonTier ||
+      (tierHeaderMatch ? tierHeaderMatch[1].toUpperCase() : null) ||
+      (g1Tier ? String(g1Tier).trim().toUpperCase() : null) ||
+      (existing && existing.g1Tier) ||
+      'TIER0';
     const entry = {
       accountId,
       authUser: resolvedAuthUser,
@@ -559,16 +578,30 @@ async function submitManualCookie() {
   const raw = document.getElementById('manual-cookie').value.trim();
   const authUser = Number(document.getElementById('manual-authuser').value || 0);
   if (!raw) return alert('请粘贴 Cookie 或油猴导出的 JSON');
+  let bodyPayload = { cookies: raw, authUser };
+  if (raw.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.cookies === 'string') {
+        bodyPayload = {
+          cookies: parsed.cookies,
+          authUser: parsed.authUser !== undefined ? Number(parsed.authUser) : authUser,
+          g1Tier: parsed.g1Tier || null,
+        };
+      }
+    } catch {}
+  }
   const res = await fetch('/api/accounts/add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cookies: raw, authUser })
+    body: JSON.stringify(bodyPayload)
   });
   const data = await res.json();
   if (!res.ok || !data.ok) {
     return alert('导入失败: ' + (data.error || '未知错误'));
   }
   document.getElementById('manual-cookie').value = '';
+  document.getElementById('manual-authuser').value = '0';
   refreshStatus();
 }
 
