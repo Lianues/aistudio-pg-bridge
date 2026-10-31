@@ -90,6 +90,14 @@ curl -s -X POST https://waa.spinsnow.fun/v1/proof/mint \
 | `proof` | `!` 开头的签名串，放进 `GenerateContent` 请求体第 5 个字段（wire 的 index 4） |
 | `poolState` | `hot`（VM 复用，毫秒级）/ `cold`（本次冷启动，约 600 ms~1 s）/ `singleflight-joined`（并发合并） |
 
+### 2.5 调用上游 `GenerateContent` 时的 `User-Agent` 要求
+
+调用 Google `MakerSuiteService/GenerateContent` 时，HTTP 请求头中的 `User-Agent` **必须与项目 3 签名服务保持一致**，固定为：
+
+```text
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+```
+
 ---
 
 ## 3. 错误格式
@@ -99,6 +107,7 @@ curl -s -X POST https://waa.spinsnow.fun/v1/proof/mint \
 | 状态码 | 场景 | 示例 |
 |---|---|---|
 | `400` | 缺 `cookies`（mint） | ``{"ok":false,"error":"Missing `cookies` in request body or X-Google-Cookies header"}`` |
+| `400` | `cookies` 残缺（缺 HttpOnly 核心项） | `{"ok":false,"error":"Cookie 信息不完整（当前仅 6 项，缺少核心 HttpOnly 凭证: HSID, SSID, __Secure-1PSID, __Secure-3PSID），请使用油猴脚本（开启 Cookie All 权限）重新获取完整 Cookie"}` |
 | `400` | 缺 `cookies`（health） | ``{"ok":false,"error":"Missing `cookies` query parameter or X-Google-Cookies header"}`` |
 | `404` | 路径不存在 | `{"ok":false,"error":"Not found: GET /nope"}` |
 | `500` | 签名失败（Cookie 失效、VM 异常等） | `{"ok":false,"error":"..."}` |
@@ -107,6 +116,7 @@ curl -s -X POST https://waa.spinsnow.fun/v1/proof/mint \
 
 ## 4. 备注
 
+- **`User-Agent` 必须一致**：下游调用 `GenerateContent`（及 `RotateCookies`）时必须固定使用 `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36`，不可随意更换。
 - **零落盘**：Cookie 只在内存；VM 空闲超过 `hotTtlMs`（默认 1 小时）后，连账号条目一起从内存删除，进程重启即清空。
 - **性能**：热态单次 `~10–30 ms`；冷启动首次 `~600 ms~1 s`（VM 重新初始化）；同一账号并发会自动合并（`singleflight-joined`）。
 - **账号隔离**：账号由 Cookie（`SAPISID` 等）推导，不同 `authUser` 视为不同账号；每次请求都用调用方当次传入的 Cookie 覆盖池内副本。
