@@ -379,92 +379,275 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WAA 本地中转网关 — Cookie 状态与 OpenAI / Gemini 接口</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>WAA RELAY // 本地中转网关</title>
 <style>
   :root {
-    --bg: #0b1120;
-    --card: #1e293b;
-    --border: #334155;
-    --text: #f8fafc;
-    --muted: #94a3b8;
-    --accent: #3b82f6;
-    --green: #10b981;
-    --amber: #f59e0b;
-    --red: #ef4444;
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --surface-sub: #f4f4f5;
+    --fg: #09090b;
+    --muted: #71717a;
+    --border: #e4e4e7;
+    --border-strong: #18181b;
+    --grid-line: rgba(9, 9, 11, 0.04);
+    --danger: #dc2626;
+    --danger-bg: rgba(220, 38, 38, 0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #09090b;
+      --surface: #111113;
+      --surface-sub: #18181b;
+      --fg: #f4f4f5;
+      --muted: #a1a1aa;
+      --border: #27272a;
+      --border-strong: #e4e4e7;
+      --grid-line: rgba(244, 244, 245, 0.035);
+      --danger: #f87171;
+      --danger-bg: rgba(248, 113, 113, 0.08);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #09090b;
+    --surface: #111113;
+    --surface-sub: #18181b;
+    --fg: #f4f4f5;
+    --muted: #a1a1aa;
+    --border: #27272a;
+    --border-strong: #e4e4e7;
+    --grid-line: rgba(244, 244, 245, 0.035);
+    --danger: #f87171;
+    --danger-bg: rgba(248, 113, 113, 0.08);
   }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; line-height: 1.5; }
-  .container { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
-  h1, h2 { margin: 0 0 12px 0; }
-  h1 { font-size: 21px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
-  h2 { font-size: 16px; color: #e2e8f0; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
-  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; }
-  .pill.green { background: rgba(16,185,129,0.18); color: #34d399; border: 1px solid rgba(16,185,129,0.4); }
-  .pill.amber { background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.4); }
-  .pill.gray { background: rgba(148,163,184,0.15); color: #94a3b8; border: 1px solid rgba(148,163,184,0.35); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
-  .stat-box { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
-  .stat-label { font-size: 12px; color: var(--muted); }
-  .stat-val { font-size: 20px; font-weight: 700; margin-top: 4px; }
+  body {
+    margin: 0;
+    padding: 28px 16px 48px;
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 28px 28px;
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 1020px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+  .card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 22px;
+  }
+  .card::before, .card::after {
+    content: "";
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border-color: var(--border-strong);
+    pointer-events: none;
+  }
+  .card::before { top: -1px; left: -1px; border-top: 2px solid var(--border-strong); border-left: 2px solid var(--border-strong); }
+  .card::after { bottom: -1px; right: -1px; border-bottom: 2px solid var(--border-strong); border-right: 2px solid var(--border-strong); }
+  h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
+  .top-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-title { font-size: 18px; font-weight: 700; letter-spacing: -0.03em; display: flex; align-items: center; gap: 10px; }
+  .poly-icon { width: 72px; height: 20px; stroke: var(--fg); fill: none; stroke-width: 1.5; stroke-linecap: square; stroke-linejoin: miter; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg); border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    background: var(--surface-sub);
+    color: var(--fg);
+  }
+  .pill.green { border-color: var(--border-strong); font-weight: 600; }
+  .pill.amber { border-style: dashed; color: var(--muted); }
+  .pill.gray { color: var(--muted); }
+  .pill.err { border-color: var(--danger); color: var(--danger); background: var(--danger-bg); }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .stat-box {
+    position: relative;
+    background: var(--surface-sub);
+    border: 1px solid var(--border);
+    padding: 14px 16px;
+    overflow: hidden;
+  }
+  .stat-poly { position: absolute; right: 10px; bottom: 8px; width: 64px; height: 22px; stroke: var(--muted); opacity: 0.35; fill: none; stroke-width: 1.25; }
+  .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-family: ui-monospace, monospace; }
+  .stat-val { font-size: 22px; font-weight: 700; margin-top: 6px; font-family: ui-monospace, monospace; letter-spacing: -0.03em; }
   .stat-sub { font-size: 12px; color: var(--muted); margin-top: 4px; word-break: break-all; }
   .kv-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
-  .kv-label { width: 150px; font-size: 13px; color: var(--muted); flex-shrink: 0; }
-  code.box { background: #0f172a; border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px; font-family: ui-monospace, monospace; font-size: 13px; color: #38bdf8; word-break: break-all; flex: 1; }
-  button { padding: 8px 14px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-weight: 600; font-size: 13px; cursor: pointer; }
-  button.green { background: var(--green); }
-  button.secondary { background: #334155; }
-  button.danger { background: var(--red); padding: 4px 10px; font-size: 12px; }
+  .kv-label { width: 140px; font-size: 12px; font-family: ui-monospace, monospace; text-transform: uppercase; color: var(--muted); flex-shrink: 0; }
+  code.box {
+    background: var(--surface-sub);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px;
+    color: var(--fg);
+    word-break: break-all;
+    flex: 1;
+    min-width: 180px;
+  }
+  button, a.btn {
+    padding: 7px 14px;
+    border: 1px solid var(--border-strong);
+    background: var(--fg);
+    color: var(--bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all 0.12s ease;
+  }
+  button:hover, a.btn:hover { opacity: 0.85; }
+  button.secondary, a.btn.secondary {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--border);
+  }
+  button.secondary:hover, a.btn.secondary:hover {
+    border-color: var(--border-strong);
+    background: var(--surface-sub);
+  }
+  button.danger {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    font-size: 11.5px;
+  }
+  button.danger:hover {
+    border-color: var(--danger);
+    background: var(--danger-bg);
+  }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; background: rgba(15,23,42,0.5); }
-  textarea, input[type="number"] { width: 100%; background: #0f172a; border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 10px 12px; font-size: 13px; font-family: ui-monospace, monospace; }
-  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
-  pre { background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; font-size: 12px; color: #cbd5e1; margin: 10px 0 0 0; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; background: var(--surface-sub); }
+  td { font-family: ui-monospace, monospace; font-size: 12.5px; }
+  textarea, input[type="number"] {
+    width: 100%;
+    background: var(--surface-sub);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 10px 12px;
+    font-size: 12.5px;
+    font-family: ui-monospace, monospace;
+    outline: none;
+  }
+  textarea:focus, input[type="number"]:focus { border-color: var(--border-strong); }
+  .import-bar { display: flex; gap: 10px; margin-top: 10px; align-items: center; flex-wrap: wrap; }
+  pre {
+    background: var(--surface-sub);
+    border: 1px solid var(--border);
+    padding: 14px;
+    overflow-x: auto;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--fg);
+    margin: 12px 0 0 0;
+  }
+  @media (max-width: 720px) {
+    body { padding: 14px 10px 36px; }
+    .card { padding: 16px 14px; }
+    .grid { grid-template-columns: 1fr; gap: 10px; }
+    .kv-row { flex-direction: column; align-items: stretch; gap: 6px; }
+    .kv-label { width: auto; }
+    code.box { width: 100%; min-width: 0; }
+    .import-bar { flex-direction: column; align-items: stretch; }
+    .import-bar input[type="number"] { width: 100% !important; }
+    .import-bar button { width: 100%; padding: 10px; }
+    table, thead, tbody, th, td, tr { display: block; }
+    thead tr { display: none; }
+    tbody tr {
+      border: 1px solid var(--border);
+      background: var(--surface-sub);
+      margin-bottom: 10px;
+      padding: 10px 12px;
+    }
+    td {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px dashed var(--border);
+      text-align: right;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    td:last-child { border-bottom: none; padding-top: 10px; justify-content: flex-end; }
+    td::before {
+      content: attr(data-label);
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      text-align: left;
+    }
+  }
 </style>
 </head>
 <body>
 <div class="container">
   <div class="card">
-    <h1>
-      <span>⚡ WAA 中转网关（Cookie 持久化 · 支持 SSE 流式响应）</span>
-      <span id="overall-badge" class="pill amber">检测中...</span>
-    </h1>
+    <div class="top-bar">
+      <div class="brand">
+        <svg class="poly-icon" viewBox="0 0 72 20"><polyline points="2,16 14,16 22,4 32,17 42,8 52,13 60,3 70,3"/></svg>
+        <div class="brand-title">WAA // RELAY GATEWAY</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span id="overall-badge" class="pill amber">检测中...</span>
+        <button class="secondary" onclick="toggleTheme()" id="theme-btn" style="padding:4px 10px;">◐ 主题</button>
+      </div>
+    </div>
     <div class="grid">
       <div class="stat-box">
-        <div class="stat-label">已加载账号</div>
+        <div class="stat-label">ACCOUNTS // 已加载账号</div>
         <div class="stat-val" id="stat-accounts">0</div>
+        <svg class="stat-poly" viewBox="0 0 64 22"><polyline points="2,18 18,14 30,17 44,6 62,4"/></svg>
       </div>
       <div class="stat-box">
-        <div class="stat-label" id="stat-pool-label">当前账号池状态</div>
+        <div class="stat-label" id="stat-pool-label">POOL // 当前账号池状态</div>
         <div class="stat-val" id="stat-pool">—</div>
         <div class="stat-sub" id="stat-pool-sub">未连接签名服务</div>
+        <svg class="stat-poly" viewBox="0 0 64 22"><polyline points="2,16 16,8 28,14 46,4 62,10"/></svg>
       </div>
       <div class="stat-box">
-        <div class="stat-label">Cookie 持久化</div>
+        <div class="stat-label">STORAGE // Cookie 持久化</div>
         <div class="stat-val" id="stat-persist" style="font-size:15px;">—</div>
         <div class="stat-sub" id="stat-persist-sub"></div>
+        <svg class="stat-poly" viewBox="0 0 64 22"><polyline points="2,12 20,12 28,5 38,18 48,12 62,12"/></svg>
       </div>
     </div>
   </div>
 
   <div class="card">
     <h2>
-      <span>🔑 1. 导入油猴抓取的 Cookie JSON / 原始 Cookie</span>
-      <button class="secondary" onclick="refreshStatus()">🔄 刷新状态</button>
+      <span>01 // 导入 Cookie 凭证</span>
+      <button class="secondary" onclick="refreshStatus()">↻ 刷新状态</button>
     </h2>
-    <div style="margin-bottom:12px;">
-      <div style="font-size:13px;color:var(--muted);margin-bottom:6px;">粘贴油猴脚本复制到剪切板的 JSON、原始 Cookie 字符串或 cURL 命令：</div>
-      <textarea id="manual-cookie" rows="3" placeholder='直接粘贴油猴导出的 JSON ({"ok":true,"authUser":0,"g1Tier":"TIER1","cookies":"..."}) 或 SID=...; SAPISID=...'></textarea>
-      <div style="display:flex;gap:10px;margin-top:8px;align-items:center;">
-        <span style="font-size:13px;color:var(--muted);">AuthUser (默认 0):</span>
-        <input id="manual-authuser" type="number" value="0" style="width:80px;" />
-        <button class="green" onclick="submitManualCookie()">✅ 导入并保存</button>
+    <div style="margin-bottom:16px;">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">粘贴油猴脚本导出的 JSON、原始 Cookie 字符串或 cURL 命令：</div>
+      <textarea id="manual-cookie" rows="3" placeholder='{"ok":true,"authUser":0,"g1Tier":"TIER1","cookies":"..."} 或 SID=...; SAPISID=...'></textarea>
+      <div class="import-bar">
+        <button onclick="submitManualCookie()">+ 导入并保存</button>
       </div>
     </div>
 
-    <div style="overflow-x:auto;">
+    <div>
       <table>
         <thead>
           <tr>
@@ -478,16 +661,16 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
           </tr>
         </thead>
         <tbody id="accounts-tbody">
-          <tr><td colspan="7" style="text-align:center;color:var(--muted);">暂无账号，请先导入 Cookie</td></tr>
+          <tr><td colspan="7" style="text-align:center;color:var(--muted);justify-content:center;">暂无账号，请先导入 Cookie</td></tr>
         </tbody>
       </table>
     </div>
   </div>
 
   <div class="card">
-    <h2>🔌 2. 本地 OpenAI / Gemini 兼容接口（支持 stream: true 实时 SSE）</h2>
+    <h2>02 // OpenAI & Gemini 兼容接口</h2>
     <div class="kv-row">
-      <span class="kv-label">OpenAI Base URL:</span>
+      <span class="kv-label">OpenAI Base:</span>
       <code class="box" id="oai-base-url"></code>
     </div>
     <div class="kv-row">
@@ -495,7 +678,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
       <code class="box" id="oai-api-key">${apiKey}</code>
     </div>
     <div class="kv-row">
-      <span class="kv-label">支持模型:</span>
+      <span class="kv-label">Models:</span>
       <code class="box">gemini-4-argon / gemini-3.8-flash / gemini-3.5-flash-lite / gemini-nano-banana-2.1 / gemini-3.1-flash-image / gemini-3.1-flash-lite-image / gemini-3-pro-image</code>
     </div>
     <pre id="curl-example"></pre>
@@ -503,6 +686,20 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
 </div>
 
 <script>
+(function initTheme() {
+  const saved = localStorage.getItem('aispg_theme');
+  if (saved === 'light' || saved === 'dark') {
+    document.documentElement.setAttribute('data-theme', saved);
+  }
+})();
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const isDark = cur ? cur === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const next = isDark ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('aispg_theme', next);
+}
+
 const API_KEY = ${JSON.stringify(apiKey)};
 const DEFAULT_MODEL = ${JSON.stringify(defaultModel)};
 const originUrl = window.location.origin;
@@ -510,7 +707,7 @@ document.getElementById('oai-base-url').textContent = originUrl + '/v1';
 document.getElementById('curl-example').textContent =
 \`curl -N \${originUrl}/v1/chat/completions \\\\
   -H "Content-Type: application/json" \\\\
-  -H "Authorization: Bearer \${API_KEY}" \\\\
+  -H "Authorization: Bearer ***" \\\\
   -d '{
     "model": "\${DEFAULT_MODEL}",
     "stream": true,
@@ -529,9 +726,9 @@ function fmtRemain(ts) {
 }
 
 function poolBadgeHtml(pool) {
-  if (!pool) return '<span class="pill gray">未入库</span>';
+  if (!pool) return '<span class="pill gray">COLD</span>';
   const cls = pool.state === 'hot' ? 'green' : 'amber';
-  return '<span class="pill ' + cls + '" title="' + fmtRemain(pool.expiresAt) + '">' + pool.state + '</span>';
+  return '<span class="pill ' + cls + '" title="' + fmtRemain(pool.expiresAt) + '">' + String(pool.state).toUpperCase() + '</span>';
 }
 
 const testResults = {};
@@ -539,10 +736,10 @@ const testResults = {};
 function renderTestBadge(accountId) {
   const r = testResults[accountId];
   if (!r) return '';
-  if (r.loading) return '<span class="pill amber" style="margin-right:6px;font-size:11px;padding:2px 8px;">⏳ 测活中...</span>';
-  if (r.alive) return '<span class="pill green" style="margin-right:6px;font-size:11px;padding:2px 8px;">✅ 正常 (' + r.elapsedMs + 'ms)</span>';
-  const shortErr = (r.error || '未知错误').slice(0, 48).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return '<span class="pill" style="margin-right:6px;font-size:11px;padding:2px 8px;background:rgba(239,68,68,0.18);color:#fca5a5;border:1px solid rgba(239,68,68,0.4);" title="' + (r.error || '').replace(/"/g, '&quot;') + '">❌ ' + shortErr + '</span>';
+  if (r.loading) return '<span class="pill amber" style="margin-right:6px;">TESTING...</span>';
+  if (r.alive) return '<span class="pill green" style="margin-right:6px;">OK · ' + r.elapsedMs + 'ms</span>';
+  const shortErr = (r.error || '未知错误').slice(0, 42).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return '<span class="pill err" style="margin-right:6px;" title="' + (r.error || '').replace(/"/g, '&quot;') + '">ERR · ' + shortErr + '</span>';
 }
 
 async function refreshStatus() {
@@ -555,41 +752,41 @@ async function refreshStatus() {
     const primary = accs[0];
     const pool = primary && primary.pool;
     document.getElementById('stat-pool-label').textContent =
-      primary ? '当前账号池状态 (' + primary.accountId + ')' : '当前账号池状态';
-    document.getElementById('stat-pool').textContent = primary ? (pool ? pool.state : '未入库') : '—';
+      primary ? 'POOL // ' + primary.accountId : 'POOL // 当前账号池状态';
+    document.getElementById('stat-pool').textContent = primary ? (pool ? String(pool.state).toUpperCase() : 'IDLE') : '—';
     document.getElementById('stat-pool-sub').textContent = pool
       ? '累计签名 ' + pool.mints + ' 次 · ' + fmtRemain(pool.expiresAt)
       : (primary ? '尚未在该签名服务中初始化' : '先导入一个 Cookie 账号');
 
     document.getElementById('stat-persist').textContent = data.cookiesDir
-      ? '已开启 · ' + (data.cookieFiles || 0) + ' 个文件'
-      : '未开启（仅内存）';
+      ? 'DISK · ' + (data.cookieFiles || 0) + ' FILES'
+      : 'MEMORY ONLY';
     document.getElementById('stat-persist-sub').textContent = data.cookiesDir || '';
 
     const badge = document.getElementById('overall-badge');
     if (accs.length > 0) {
       badge.className = 'pill green';
-      badge.textContent = '✅ Cookie 已就绪 (' + accs.length + ' 个账号)';
+      badge.textContent = 'READY · ' + accs.length;
     } else {
       badge.className = 'pill amber';
-      badge.textContent = '⚠️ 暂无 Cookie 账号 (请导入)';
+      badge.textContent = 'NO COOKIE';
     }
 
     const tbody = document.getElementById('accounts-tbody');
     if (accs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);">暂无账号，请先导入 Cookie</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);justify-content:center;">暂无账号，请先导入 Cookie</td></tr>';
     } else {
       tbody.innerHTML = accs.map(a => \`
         <tr>
-          <td><code>\${a.accountId}</code></td>
-          <td><code>\${a.g1Tier || 'TIER0'}</code></td>
-          <td>\${a.authUser}</td>
-          <td title="\${(a.cookieNames || []).join(', ')}">\${a.cookieCount}</td>
-          <td>\${poolBadgeHtml(a.pool)}</td>
-          <td>\${a.requestsCount}</td>
-          <td>
+          <td data-label="账号 ID"><code>\${a.accountId}</code></td>
+          <td data-label="等级 (Tier)"><code>\${a.g1Tier || 'TIER0'}</code></td>
+          <td data-label="AuthUser">\${a.authUser}</td>
+          <td data-label="Cookie 数" title="\${(a.cookieNames || []).join(', ')}">\${a.cookieCount}</td>
+          <td data-label="池状态">\${poolBadgeHtml(a.pool)}</td>
+          <td data-label="调用次数">\${a.requestsCount}</td>
+          <td data-label="操作">
             \${renderTestBadge(a.accountId)}
-            <button class="secondary" onclick="testAcc('\${a.accountId}')" style="padding:4px 10px;font-size:12px;margin-right:6px;">⚡ 测活</button>
+            <button class="secondary" onclick="testAcc('\${a.accountId}')" style="padding:4px 10px;font-size:11.5px;margin-right:4px;">⚡ 测活</button>
             <button class="danger" onclick="removeAcc('\${a.accountId}')">移除</button>
           </td>
         </tr>
@@ -600,16 +797,15 @@ async function refreshStatus() {
 
 async function submitManualCookie() {
   const raw = document.getElementById('manual-cookie').value.trim();
-  const authUser = Number(document.getElementById('manual-authuser').value || 0);
   if (!raw) return alert('请粘贴 Cookie 或油猴导出的 JSON');
-  let bodyPayload = { cookies: raw, authUser };
+  let bodyPayload = { cookies: raw, authUser: 0 };
   if (raw.startsWith('{')) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed.cookies === 'string') {
         bodyPayload = {
           cookies: parsed.cookies,
-          authUser: parsed.authUser !== undefined ? Number(parsed.authUser) : authUser,
+          authUser: parsed.authUser !== undefined ? Number(parsed.authUser) : 0,
           g1Tier: parsed.g1Tier || null,
         };
       }
@@ -625,7 +821,6 @@ async function submitManualCookie() {
     return alert('导入失败: ' + (data.error || '未知错误'));
   }
   document.getElementById('manual-cookie').value = '';
-  document.getElementById('manual-authuser').value = '0';
   refreshStatus();
 }
 
