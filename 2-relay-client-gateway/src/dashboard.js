@@ -78,6 +78,11 @@ function extractMinimalCookies(rawInput) {
   return { map: minMap, header };
 }
 
+function currentQuotaBucket(now = Date.now()) {
+  // Daily rollover at 15:00 UTC+8 (= 07:00 UTC)
+  return new Date(now - 7 * 3600 * 1000).toISOString().slice(0, 10);
+}
+
 function computeAccountId(cookieMap, authUser = 0) {
   const anchor =
     cookieMap.get('SAPISID') ||
@@ -146,7 +151,7 @@ class RelayAccountStore {
     try {
       for (const { file, data } of files) {
         try {
-          this.addAccount(
+          const pub = this.addAccount(
             {
               cookies: data.cookies,
               authUser: data.authUser ?? 0,
@@ -156,6 +161,22 @@ class RelayAccountStore {
             data.g1Tier || null,
             data.source || 'disk',
           );
+          const restored = this.accounts.get(pub.accountId);
+          if (restored) {
+            const curBucket = currentQuotaBucket();
+            if (data.dailyBucket === curBucket) {
+              restored.dailyBucket = curBucket;
+              restored.requestsCount = Number(data.requestsCount || 0);
+              restored.dailyModelCounts =
+                data.dailyModelCounts && typeof data.dailyModelCounts === 'object'
+                  ? { ...data.dailyModelCounts }
+                  : {};
+            } else {
+              restored.dailyBucket = curBucket;
+              restored.requestsCount = 0;
+              restored.dailyModelCounts = {};
+            }
+          }
           loaded += 1;
         } catch (err) {
           console.warn(`[relay] 跳过无效 Cookie 文件 ${file}: ${err.message}`);
@@ -269,6 +290,8 @@ class RelayAccountStore {
       (g1Tier ? String(g1Tier).trim().toUpperCase() : null) ||
       (existing && existing.g1Tier) ||
       'TIER0';
+    const curBucket = currentQuotaBucket(now);
+    const sameBucket = existing && existing.dailyBucket === curBucket;
     const entry = {
       accountId,
       authUser: resolvedAuthUser,
@@ -281,7 +304,9 @@ class RelayAccountStore {
       addedAt: existing ? existing.addedAt : now,
       updatedAt: now,
       lastUsedAt: existing ? existing.lastUsedAt : 0,
-      requestsCount: existing ? existing.requestsCount : 0,
+      dailyBucket: curBucket,
+      requestsCount: sameBucket ? existing.requestsCount || 0 : 0,
+      dailyModelCounts: sameBucket && existing.dailyModelCounts ? { ...existing.dailyModelCounts } : {},
       lastError: null,
     };
     this.accounts.set(accountId, entry);
@@ -348,13 +373,45 @@ class RelayAccountStore {
       if (excluded.has(candidate.accountId)) continue;
       this.rrIndex = (idx + 1) % list.length;
       candidate.lastUsedAt = Date.now();
-      candidate.requestsCount += 1;
       return candidate;
     }
     return null;
   }
 
+  _ensureDailyBucket(entry) {
+    const curBucket = currentQuotaBucket();
+    if (entry.dailyBucket !== curBucket) {
+      entry.dailyBucket = curBucket;
+      entry.requestsCount = 0;
+      entry.dailyModelCounts = {};
+      this.persist(entry);
+    } else if (!entry.dailyModelCounts || typeof entry.dailyModelCounts !== 'object') {
+      entry.dailyModelCounts = {};
+    }
+  }
+
+  recordModelUsage(accountId, model) {
+    const entry = this.accounts.get(accountId);
+    if (!entry) return;
+    this._ensureDailyBucket(entry);
+    const cleanModel = String(model || '')
+      .trim()
+      .replace(/^models\//i, '')
+      .replace(/-(high|medium|low|minimal)$/i, '');
+    entry.lastUsedAt = Date.now();
+    entry.requestsCount = (entry.requestsCount || 0) + 1;
+    if (cleanModel) {
+      entry.dailyModelCounts[cleanModel] = (entry.dailyModelCounts[cleanModel] || 0) + 1;
+    }
+    this.persist(entry);
+  }
+
   toPublicView(entry) {
+    this._ensureDailyBucket(entry);
+    const topModels = Object.entries(entry.dailyModelCounts || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([model, count]) => ({ model, count }));
     return {
       accountId: entry.accountId,
       authUser: entry.authUser,
@@ -366,7 +423,9 @@ class RelayAccountStore {
       addedAt: entry.addedAt,
       updatedAt: entry.updatedAt,
       lastUsedAt: entry.lastUsedAt,
-      requestsCount: entry.requestsCount,
+      dailyBucket: entry.dailyBucket,
+      requestsCount: entry.requestsCount || 0,
+      topModels,
       lastError: entry.lastError,
     };
   }
@@ -658,7 +717,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
             <th>AuthUser</th>
             <th>Cookie 数</th>
             <th>池状态</th>
-            <th>调用次数</th>
+            <th>当日调用 (UTC+8 15:00 刷新)</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -744,6 +803,16 @@ function renderTestBadge(accountId) {
   return '<span class="pill err" style="margin-right:6px;" title="' + (r.error || '').replace(/"/g, '&quot;') + '">ERR · ' + shortErr + '</span>';
 }
 
+function renderUsageHtml(a) {
+  const total = a.requestsCount || 0;
+  const tops = Array.isArray(a.topModels) ? a.topModels : [];
+  if (tops.length === 0) return '<span>' + total + '</span>';
+  const tags = tops
+    .map(t => '<span class="pill gray" style="padding:1px 6px;font-size:11px;">' + t.model + ' ×' + t.count + '</span>')
+    .join(' ');
+  return '<div style="display:flex;flex-direction:column;gap:4px;align-items:flex-start;"><strong>' + total + ' 次</strong><div style="display:flex;gap:4px;flex-wrap:wrap;">' + tags + '</div></div>';
+}
+
 async function refreshStatus() {
   try {
     const res = await fetch('/api/status');
@@ -785,7 +854,7 @@ async function refreshStatus() {
           <td data-label="AuthUser">\${a.authUser}</td>
           <td data-label="Cookie 数" title="\${(a.cookieNames || []).join(', ')}">\${a.cookieCount}</td>
           <td data-label="池状态">\${poolBadgeHtml(a.pool)}</td>
-          <td data-label="调用次数">\${a.requestsCount}</td>
+          <td data-label="当日调用 (15:00刷新)">\${renderUsageHtml(a)}</td>
           <td data-label="操作">
             \${renderTestBadge(a.accountId)}
             <button class="secondary" onclick="testAcc('\${a.accountId}')" style="padding:4px 10px;font-size:11.5px;margin-right:4px;">⚡ 测活</button>

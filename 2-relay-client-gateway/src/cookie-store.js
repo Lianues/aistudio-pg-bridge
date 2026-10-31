@@ -86,6 +86,9 @@ class CookieStore {
       source: entry.source || 'manual',
       addedAt: entry.addedAt,
       updatedAt: entry.updatedAt || Date.now(),
+      requestsCount: entry.requestsCount || 0,
+      dailyBucket: entry.dailyBucket || null,
+      dailyModelCounts: entry.dailyModelCounts || {},
       cookies: entry.cookies,
     };
     fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: FILE_MODE });

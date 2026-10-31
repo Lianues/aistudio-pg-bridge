@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const {
   extractMinimalCookies,
+  computeAccountId,
   resolveModelAlias,
   RelayAccountStore,
   renderDashboardHtml,
@@ -1535,6 +1536,13 @@ class WaaRelayClient {
       const err = new Error(`Google GenerateContent HTTP ${res.status}: ${rawText.slice(0, 240)}`);
       err.httpStatus = res.status;
       throw err;
+    }
+
+    const usedAccountId =
+      accountId ||
+      (minimal.map.size > 0 ? computeAccountId(minimal.map, auth.authUser ?? 0) : null);
+    if (this.accountStore && usedAccountId && typeof this.accountStore.recordModelUsage === 'function') {
+      this.accountStore.recordModelUsage(usedAccountId, targetModel);
     }
 
     return { res, proofPkg, targetModel, tRpc0 };
