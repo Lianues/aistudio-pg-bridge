@@ -248,6 +248,15 @@ class RelayAccountStore {
     ) {
       throw new Error('未检测到有效的 Google 核心鉴权 Cookie (需包含 SID / SAPISID / __Secure-1PSID)');
     }
+    if (
+      !min.map.has('__Secure-1PSID') &&
+      !min.map.has('__Secure-3PSID') &&
+      !min.map.has('HSID')
+    ) {
+      throw new Error(
+        `仅检测到 ${min.map.size} 项非 HttpOnly Cookie，缺少 __Secure-1PSID / HSID / SSID（请在油猴设置开启 Cookie All 权限后重新抓取，切勿使用 document.cookie）`,
+      );
+    }
 
     const accountId = computeAccountId(min.map, resolvedAuthUser);
     const now = Date.now();
