@@ -1165,8 +1165,92 @@ class IncrementalJspbFrameParser {
   }
 }
 
+const GRPC_STATUS_MAP = {
+  1: 'CANCELLED',
+  2: 'UNKNOWN',
+  3: 'INVALID_ARGUMENT',
+  4: 'DEADLINE_EXCEEDED',
+  5: 'NOT_FOUND',
+  6: 'ALREADY_EXISTS',
+  7: 'PERMISSION_DENIED',
+  8: 'RESOURCE_EXHAUSTED',
+  9: 'FAILED_PRECONDITION',
+  10: 'ABORTED',
+  11: 'OUT_OF_RANGE',
+  12: 'UNIMPLEMENTED',
+  13: 'INTERNAL',
+  14: 'UNAVAILABLE',
+  15: 'DATA_LOSS',
+  16: 'UNAUTHENTICATED',
+};
+
+/** MakerSuite/gRPC 错误体形如 `[,[8,"...message..."]]`（含空位的非严格 JSON），抽出 [code, message]。 */
+function extractUpstreamError(rawText) {
+  const text = String(rawText == null ? '' : rawText).trim();
+  if (!text || text.startsWith('<')) return null;
+  let root = null;
+  try {
+    root = JSON.parse(text);
+  } catch {
+    root = null;
+  }
+  if (root !== null) {
+    const found = [];
+    const scan = (node, depth) => {
+      if (!Array.isArray(node) || depth > 3) return;
+      if (typeof node[0] === 'number' && typeof node[1] === 'string') {
+        found.push([node[0], node[1]]);
+        return;
+      }
+      for (const child of node) scan(child, depth + 1);
+    };
+    scan(root, 0);
+    if (found[0]) return found[0];
+  }
+  const m = text.match(/\[\s*(\d{1,2})\s*,\s*"((?:[^"\\]|\\.)*)"/);
+  if (m) {
+    let message = m[2];
+    try {
+      message = JSON.parse(`"${m[2]}"`);
+    } catch {}
+    return [Number(m[1]), message];
+  }
+  return null;
+}
+
+function extractUpstreamHtmlMessage(html) {
+  const text = String(html || '');
+  const pick =
+    (text.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] ||
+    (text.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1] ||
+    '';
+  const cleaned = pick
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (
+    cleaned ||
+    'Google GenerateContent 返回了 HTML 错误页（通常是该模型今日配额已用尽或被边缘风控拦截），请稍后重试或切换其它模型'
+  ).slice(0, 240);
+}
+
 function parseMakerSuiteResponse(rawText) {
-  const root = JSON.parse(rawText);
+  const text = String(rawText == null ? '' : rawText);
+  if (/^\s*<(!doctype|html)/i.test(text)) {
+    const snippet = extractUpstreamHtmlMessage(text);
+    const htmlErr = new Error(`Google GenerateContent 返回 HTML 错误页：${snippet}`);
+    htmlErr.httpStatus = 429;
+    htmlErr.upstreamHtml = true;
+    htmlErr.officialError = {
+      error: { code: 429, message: snippet, status: 'RESOURCE_EXHAUSTED' },
+    };
+    throw htmlErr;
+  }
+  const root = JSON.parse(text);
   const frames = Array.isArray(root) && Array.isArray(root[0]) ? root[0] : [];
 
   let fullText = '';
@@ -1423,6 +1507,7 @@ class WaaRelayClient {
         tried: new Set(accountId ? [accountId] : []),
         rotatedAccounts: new Set(),
         retry403Counts: new Map(),
+        retryHtmlCounts: new Map(),
         fromStore: !!fromStore,
         maxAttempts: fromStore && accountId ? Math.min(this.accountStore.countReady(), 3) : 1,
       };
@@ -1519,6 +1604,47 @@ class WaaRelayClient {
       }
     }
 
+    const upstreamContentType = String(res.headers.get('content-type') || '').toLowerCase();
+    const looksHtml =
+      upstreamContentType.includes('text/html') || upstreamContentType.includes('application/xhtml');
+    if (looksHtml) {
+      // Google 在额度耗尽 / 边缘风控时可能用 HTTP 200 返回 HTML 拦截页。
+      // 直接交给 JSON.parse 会报 "Unexpected JSON token ... <!DOCTYPE html>"，这里统一转成官方错误 JSON。
+      let htmlText = '';
+      try {
+        htmlText = await res.text();
+      } catch {}
+      const snippet = extractUpstreamHtmlMessage(htmlText);
+      const htmlKey = accountId || 'default';
+      const countHtml = (state.retryHtmlCounts && state.retryHtmlCounts.get(htmlKey)) || 0;
+      if (countHtml < 2) {
+        state.retryHtmlCounts.set(htmlKey, countHtml + 1);
+        return this.openGenerateStream(
+          {
+            ...params,
+            wireContents: resolvedWireContents,
+            model: targetModel,
+            cookies: auth.cookies,
+            g1Tier: resolvedTier,
+          },
+          state,
+        );
+      }
+      const htmlErr = new Error(
+        `Google GenerateContent 返回 HTML 错误页（HTTP ${res.status}）：${snippet}`,
+      );
+      htmlErr.httpStatus = 429;
+      htmlErr.upstreamHtml = true;
+      htmlErr.officialError = {
+        error: {
+          code: 429,
+          message: snippet,
+          status: 'RESOURCE_EXHAUSTED',
+        },
+      };
+      throw htmlErr;
+    }
+
     if (!res.ok) {
       const rawText = await res.text();
       const regionBlocked = res.status === 403 && rawText.includes('Region not supported');
@@ -1570,8 +1696,29 @@ class WaaRelayClient {
         if (switched) return switched;
       }
 
-      const err = new Error(`Google GenerateContent HTTP ${res.status}: ${rawText.slice(0, 240)}`);
+      const upstreamErr = extractUpstreamError(rawText);
+      const message = upstreamErr
+        ? upstreamErr[1]
+        : rawText.replace(/^\s*/, '').slice(0, 240);
+      const err = new Error(`Google GenerateContent HTTP ${res.status}: ${message}`);
       err.httpStatus = res.status;
+      err.officialError = {
+        error: {
+          code: res.status,
+          message,
+          status:
+            GRPC_STATUS_MAP[upstreamErr && upstreamErr[0]] ||
+            (res.status === 429
+              ? 'RESOURCE_EXHAUSTED'
+              : res.status === 403
+                ? 'PERMISSION_DENIED'
+                : res.status === 401
+                  ? 'UNAUTHENTICATED'
+                  : res.status >= 500
+                    ? 'INTERNAL'
+                    : 'UNKNOWN'),
+        },
+      };
       throw err;
     }
 
@@ -2340,13 +2487,18 @@ function createRelayServer(options = {}) {
           };
           const tools = body.tools || null;
           const cleanModel = String(model || relayClient.defaultModel).replace(/^models\//, '');
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            Connection: 'keep-alive',
-            'X-Accel-Buffering': 'no',
-            'Access-Control-Allow-Origin': '*',
-          });
+          let geminiHeadersSent = false;
+          const ensureGeminiHeaders = () => {
+            if (geminiHeadersSent) return;
+            geminiHeadersSent = true;
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache, no-transform',
+              Connection: 'keep-alive',
+              'X-Accel-Buffering': 'no',
+              'Access-Control-Allow-Origin': '*',
+            });
+          };
 
           await relayClient.streamGenerateContent(
             {
@@ -2362,6 +2514,7 @@ function createRelayServer(options = {}) {
             },
             ({ geminiParts, finishReasonCode, usage }) => {
               if ((!geminiParts || geminiParts.length === 0) && !usage) return;
+              ensureGeminiHeaders();
               const u = usage || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
               const chunk = {
                 candidates: [
@@ -2384,6 +2537,7 @@ function createRelayServer(options = {}) {
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
             },
           );
+          ensureGeminiHeaders();
           return res.end();
         }
 
@@ -2395,6 +2549,9 @@ function createRelayServer(options = {}) {
       return sendJson(res, 404, { error: { message: `Route not found: ${req.method} ${pathname}` } });
     } catch (err) {
       const status = err.httpStatus || 500;
+      if (err && err.officialError) {
+        return sendJson(res, status, err.officialError);
+      }
       return sendJson(res, status, {
         error: {
           message: err && err.message ? err.message : String(err),
