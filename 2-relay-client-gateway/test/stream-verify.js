@@ -214,10 +214,40 @@ async function runTest() {
   });
   const relayInfo = await relay.listen();
 
-  // Add account
-  await fetch(`${relayInfo.url}/v1/accounts/add`, {
+  // 3b. Verify Panel Password Login (`GET /` unauth -> login page, `/api/status` unauth -> 401, `POST /api/login` -> session cookie)
+  const unauthHomeHtml = await fetch(`${relayInfo.url}/`).then((r) => r.text());
+  assert.ok(unauthHomeHtml.includes('请输入网关 API Key'));
+  assert.ok(!unauthHomeHtml.includes('sk-test-key'));
+
+  const unauthStatusRes = await fetch(`${relayInfo.url}/api/status`);
+  assert.strictEqual(unauthStatusRes.status, 401);
+
+  const TEST_KEY = ['sk', 'test', 'key'].join('-');
+  const badLoginRes = await fetch(`${relayInfo.url}/api/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: 'wrong-key' }),
+  });
+  assert.strictEqual(badLoginRes.status, 401);
+
+  const goodLoginRes = await fetch(`${relayInfo.url}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: TEST_KEY }),
+  });
+  assert.strictEqual(goodLoginRes.status, 200);
+  const panelCookie = (goodLoginRes.headers.get('set-cookie') || '').split(';')[0];
+  assert.ok(panelCookie.startsWith('waa_relay_session='));
+
+  const authHomeHtml = await fetch(`${relayInfo.url}/`, {
+    headers: { Cookie: panelCookie },
+  }).then((r) => r.text());
+  assert.ok(authHomeHtml.includes('01 // 导入 Cookie 凭证'));
+
+  // Add account (using panel session cookie)
+  await fetch(`${relayInfo.url}/v1/accounts/add`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: panelCookie },
     body: JSON.stringify({
       ok: true,
       authUser: 0,
@@ -780,11 +810,13 @@ async function runTest() {
 
   // 11. Test Account Liveness Check (`POST /api/accounts/test` -> calls `models/gemini-3.5-flash-lite`)
   mockMode = 'text_and_thought';
-  const statusList = await fetch(`${relayInfo.url}/api/status`).then((r) => r.json());
+  const statusList = await fetch(`${relayInfo.url}/api/status`, {
+    headers: { Cookie: panelCookie },
+  }).then((r) => r.json());
   const firstAccId = statusList.accounts[0].accountId;
   const testAccRes = await fetch(`${relayInfo.url}/api/accounts/test`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', Cookie: panelCookie },
     body: JSON.stringify({ accountId: firstAccId }),
   }).then((r) => r.json());
   assert.strictEqual(testAccRes.ok, true);

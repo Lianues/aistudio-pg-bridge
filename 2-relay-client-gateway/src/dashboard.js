@@ -435,6 +435,206 @@ class RelayAccountStore {
   }
 }
 
+function renderLoginHtml() {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>登录 // WAA RELAY GATEWAY</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #ffffff;
+    --surface-sub: #f4f4f5;
+    --fg: #09090b;
+    --muted: #71717a;
+    --border: #e4e4e7;
+    --border-strong: #18181b;
+    --grid-line: rgba(9, 9, 11, 0.04);
+    --danger: #dc2626;
+    --danger-bg: rgba(220, 38, 38, 0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #09090b;
+      --surface: #111113;
+      --surface-sub: #18181b;
+      --fg: #f4f4f5;
+      --muted: #a1a1aa;
+      --border: #27272a;
+      --border-strong: #e4e4e7;
+      --grid-line: rgba(244, 244, 245, 0.035);
+      --danger: #f87171;
+      --danger-bg: rgba(248, 113, 113, 0.08);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #09090b;
+    --surface: #111113;
+    --surface-sub: #18181b;
+    --fg: #f4f4f5;
+    --muted: #a1a1aa;
+    --border: #27272a;
+    --border-strong: #e4e4e7;
+    --grid-line: rgba(244, 244, 245, 0.035);
+    --danger: #f87171;
+    --danger-bg: rgba(248, 113, 113, 0.08);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+    background-size: 28px 28px;
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .login-card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 36px 32px;
+    max-width: 440px;
+    width: 100%;
+  }
+  .login-card::before, .login-card::after {
+    content: "";
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    pointer-events: none;
+  }
+  .login-card::before { top: -1px; left: -1px; border-top: 2px solid var(--border-strong); border-left: 2px solid var(--border-strong); }
+  .login-card::after { bottom: -1px; right: -1px; border-bottom: 2px solid var(--border-strong); border-right: 2px solid var(--border-strong); }
+  .top-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+  .poly-line { width: 88px; height: 24px; stroke: var(--fg); fill: none; stroke-width: 1.5; }
+  .theme-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 4px 10px;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  h1 { margin: 0 0 8px 0; font-size: 20px; font-weight: 700; letter-spacing: -0.03em; font-family: ui-monospace, monospace; }
+  p { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 0 0 22px 0; }
+  input[type="password"] {
+    width: 100%;
+    background: var(--surface-sub);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 11px 12px;
+    font-size: 13px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    outline: none;
+    margin-bottom: 12px;
+  }
+  input[type="password"]:focus { border-color: var(--border-strong); }
+  .login-btn {
+    width: 100%;
+    padding: 11px 18px;
+    background: var(--fg);
+    color: var(--bg);
+    border: 1px solid var(--border-strong);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    transition: opacity 0.12s;
+  }
+  .login-btn:hover { opacity: 0.86; }
+  .err-msg {
+    display: none;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    font-size: 12px;
+    font-family: ui-monospace, monospace;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+    background: var(--danger-bg);
+  }
+</style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="top-row">
+      <svg class="poly-line" viewBox="0 0 88 24">
+        <polyline points="2,18 18,18 26,5 38,20 50,9 62,15 72,4 86,4"/>
+      </svg>
+      <button class="theme-toggle" onclick="toggleTheme()">◐ 主题</button>
+    </div>
+    <h1>WAA // RELAY GATEWAY</h1>
+    <p>请输入网关 API Key（登录密码）以访问 Cookie 凭证管理面板。<br>下游 OpenAI / Gemini 接口调用不受影响。</p>
+    <div id="login-err" class="err-msg"></div>
+    <form onsubmit="submitLogin(event)">
+      <input type="password" id="login-key" placeholder="输入 RELAY_API_KEY..." autocomplete="current-password" autofocus>
+      <button type="submit" class="login-btn" id="login-btn">验证并进入面板 →</button>
+    </form>
+  </div>
+<script>
+(function initTheme() {
+  const saved = localStorage.getItem('aispg_theme');
+  if (saved === 'light' || saved === 'dark') {
+    document.documentElement.setAttribute('data-theme', saved);
+  }
+})();
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const isDark = cur ? cur === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const next = isDark ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('aispg_theme', next);
+}
+async function submitLogin(e) {
+  e.preventDefault();
+  const key = document.getElementById('login-key').value.trim();
+  const errEl = document.getElementById('login-err');
+  const btn = document.getElementById('login-btn');
+  if (!key) {
+    errEl.style.display = 'block';
+    errEl.textContent = '请输入 API Key';
+    return;
+  }
+  errEl.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: key })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      errEl.style.display = 'block';
+      errEl.textContent = data.error || 'API Key 错误';
+      btn.disabled = false;
+      btn.textContent = '验证并进入面板 →';
+      return;
+    }
+    window.location.reload();
+  } catch (err) {
+    errEl.style.display = 'block';
+    errEl.textContent = '网络请求失败: ' + err.message;
+    btn.disabled = false;
+    btn.textContent = '验证并进入面板 →';
+  }
+}
+</script>
+</body>
+</html>`;
+}
+
 function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -672,6 +872,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         <span id="overall-badge" class="pill amber">检测中...</span>
         <button class="secondary" onclick="toggleTheme()" id="theme-btn" style="padding:4px 10px;">◐ 主题</button>
+        <a href="/logout" class="btn secondary" style="padding:4px 10px;">退出</a>
       </div>
     </div>
     <div class="grid">
@@ -816,6 +1017,7 @@ function renderUsageHtml(a) {
 async function refreshStatus() {
   try {
     const res = await fetch('/api/status');
+    if (res.status === 401) return window.location.reload();
     const data = await res.json();
     const accs = data.accounts || [];
     document.getElementById('stat-accounts').textContent = accs.length;
@@ -939,5 +1141,6 @@ module.exports = {
   computeAccountId,
   resolveModelAlias,
   RelayAccountStore,
+  renderLoginHtml,
   renderDashboardHtml,
 };

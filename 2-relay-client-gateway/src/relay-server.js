@@ -14,6 +14,7 @@ const {
   computeAccountId,
   resolveModelAlias,
   RelayAccountStore,
+  renderLoginHtml,
   renderDashboardHtml,
 } = require('./dashboard');
 const {
@@ -1795,17 +1796,63 @@ async function fetchAccountPoolInfo(relayClient, entry) {
   }
 }
 
-function extractRequestAuth(req, body, relayClient, expectedApiKey) {
+function computeSessionToken(apiKey) {
+  return crypto
+    .createHmac('sha256', `waa-relay-session:${apiKey}`)
+    .update('panel-auth-v1')
+    .digest('hex');
+}
+
+function parseHttpCookies(req) {
+  const raw = String(req.headers.cookie || '');
+  const out = {};
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) {
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      if (k) {
+        try {
+          out[k] = decodeURIComponent(v);
+        } catch {
+          out[k] = v;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function extractProvidedApiKey(req, url) {
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const xApiKey = String(req.headers['x-api-key'] || '').trim();
+  const xGoogKey = String(req.headers['x-goog-api-key'] || '').trim();
+  const queryKey = url && url.searchParams ? String(url.searchParams.get('key') || '').trim() : '';
+  return bearer || xApiKey || xGoogKey || queryKey;
+}
+
+function isPanelAuthenticated(req, url, expectedApiKey) {
+  if (!expectedApiKey) return true;
+  const cookies = parseHttpCookies(req);
+  if (cookies.waa_relay_session && cookies.waa_relay_session === computeSessionToken(expectedApiKey)) {
+    return true;
+  }
+  const providedKey = extractProvidedApiKey(req, url);
+  if (providedKey && providedKey === expectedApiKey) {
+    return true;
+  }
+  return false;
+}
+
+function extractRequestAuth(req, body, relayClient, expectedApiKey, url = null) {
   let cookies = req.headers['x-google-cookies'] || body.cookies || '';
   let authUser = req.headers['x-goog-authuser'] ?? body.authUser;
   let g1Tier = req.headers['x-aistudio-g1-tier'] || body.g1Tier || null;
   let accountId = null;
   let fromStore = false;
 
-  const authHeader = String(req.headers.authorization || '').trim();
-  const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
-  const xGoogKey = String(req.headers['x-goog-api-key'] || '').trim();
-  const providedToken = bearer || xGoogKey;
+  const providedToken = extractProvidedApiKey(req, url);
 
   if (!cookies && providedToken && (providedToken.includes('SID=') || providedToken.includes('SAPISID='))) {
     cookies = providedToken;
@@ -1855,9 +1902,38 @@ function createRelayServer(options = {}) {
 
     try {
       if (req.method === 'GET' && pathname === '/') {
+        if (!isPanelAuthenticated(req, url, apiKey)) {
+          const html = renderLoginHtml();
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          return res.end(html);
+        }
         const html = renderDashboardHtml({ apiKey, defaultModel: relayClient.defaultModel });
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end(html);
+      }
+
+      if (req.method === 'POST' && pathname === '/api/login') {
+        const body = await readJsonBody(req);
+        const inputKey = String(body.apiKey || body.password || '').trim();
+        if (apiKey && inputKey !== apiKey) {
+          return sendJson(res, 401, { ok: false, error: 'API Key 错误' });
+        }
+        const token = computeSessionToken(apiKey);
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Set-Cookie': `waa_relay_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`,
+        });
+        return res.end(JSON.stringify({ ok: true }));
+      }
+
+      if ((req.method === 'GET' && pathname === '/logout') || (req.method === 'POST' && pathname === '/api/logout')) {
+        const clearCookie = 'waa_relay_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0';
+        if (req.method === 'GET') {
+          res.writeHead(302, { Location: '/', 'Set-Cookie': clearCookie });
+          return res.end();
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': clearCookie });
+        return res.end(JSON.stringify({ ok: true }));
       }
 
       if (req.method === 'GET' && pathname === '/health') {
@@ -1871,6 +1947,9 @@ function createRelayServer(options = {}) {
       }
 
       if (req.method === 'GET' && pathname === '/api/status') {
+        if (!isPanelAuthenticated(req, url, apiKey)) {
+          return sendJson(res, 401, { ok: false, error: 'Unauthorized: 请先使用 API Key 登录面板' });
+        }
         const store = relayClient.accountStore;
         const accounts = store.listPublic();
         const poolByAccount = {};
@@ -1892,6 +1971,9 @@ function createRelayServer(options = {}) {
       }
 
       if (req.method === 'POST' && (pathname === '/api/accounts/add' || pathname === '/v1/accounts/add')) {
+        if (!isPanelAuthenticated(req, url, apiKey)) {
+          return sendJson(res, 401, { ok: false, error: 'Unauthorized: 请先使用 API Key 登录面板' });
+        }
         const body = await readJsonBody(req);
         const pubAcc = relayClient.accountStore.addAccount(
           body.cookies || body,
@@ -1903,12 +1985,18 @@ function createRelayServer(options = {}) {
       }
 
       if (req.method === 'POST' && pathname === '/api/accounts/remove') {
+        if (!isPanelAuthenticated(req, url, apiKey)) {
+          return sendJson(res, 401, { ok: false, error: 'Unauthorized: 请先使用 API Key 登录面板' });
+        }
         const body = await readJsonBody(req);
         relayClient.accountStore.removeAccount(body.accountId);
         return sendJson(res, 200, { ok: true });
       }
 
       if (req.method === 'POST' && (pathname === '/api/accounts/test' || pathname === '/v1/accounts/test')) {
+        if (!isPanelAuthenticated(req, url, apiKey)) {
+          return sendJson(res, 401, { ok: false, error: 'Unauthorized: 请先使用 API Key 登录面板' });
+        }
         const body = await readJsonBody(req);
         const entry = relayClient.accountStore.accounts.get(body.accountId);
         if (!entry) {
@@ -1996,7 +2084,7 @@ function createRelayServer(options = {}) {
       //    - `thoughtSignature` is omitted (Gemini-only)
       if (req.method === 'POST' && pathname === '/v1/chat/completions') {
         const body = await readJsonBody(req);
-        const auth = extractRequestAuth(req, body, relayClient, apiKey);
+        const auth = extractRequestAuth(req, body, relayClient, apiKey, url);
 
         if (body.stream) {
           const wireContents = buildWireContentsFromPayload(body);
@@ -2171,7 +2259,7 @@ function createRelayServer(options = {}) {
         const model = decodeURIComponent(geminiMatch[1]);
         const action = geminiMatch[2];
         const body = await readJsonBody(req);
-        const auth = extractRequestAuth(req, body, relayClient, apiKey);
+        const auth = extractRequestAuth(req, body, relayClient, apiKey, url);
 
         if (action === 'streamGenerateContent') {
           const wireContents = buildWireContentsFromPayload(body);
