@@ -1422,6 +1422,7 @@ class WaaRelayClient {
       retryState || {
         tried: new Set(accountId ? [accountId] : []),
         rotatedAccounts: new Set(),
+        retry403Counts: new Map(),
         fromStore: !!fromStore,
         maxAttempts: fromStore && accountId ? Math.min(this.accountStore.countReady(), 3) : 1,
       };
@@ -1456,7 +1457,25 @@ class WaaRelayClient {
       generationConfig,
     });
 
-    const resolvedTier = g1Tier || auth.g1Tier || 'TIER0';
+    const detectedTier =
+      proofPkg && (proofPkg.g1Tier === 'TIER1' || proofPkg.g1Tier === 'TIER2')
+        ? proofPkg.g1Tier
+        : null;
+    const resolvedTier = detectedTier || g1Tier || auth.g1Tier || 'TIER0';
+    if (detectedTier && this.accountStore && this.accountStore.accounts) {
+      const targetId =
+        accountId ||
+        (minimal.map.size > 0 ? computeAccountId(minimal.map, auth.authUser ?? 0) : null);
+      const storedEntry = targetId ? this.accountStore.accounts.get(targetId) : null;
+      if (storedEntry && storedEntry.g1Tier !== detectedTier) {
+        storedEntry.g1Tier = detectedTier;
+        if (this.accountStore.cookieStore && typeof this.accountStore.cookieStore.save === 'function') {
+          try {
+            this.accountStore.cookieStore.save(storedEntry);
+          } catch {}
+        }
+      }
+    }
     const reqHeaders = {
       'content-type': 'application/json+protobuf',
       'x-user-agent': 'grpc-web-javascript/0.1',
@@ -1524,6 +1543,23 @@ class WaaRelayClient {
                 wireContents: resolvedWireContents,
                 model: targetModel,
                 cookies: rotated,
+              },
+              state,
+            );
+          }
+        }
+
+        if (res.status === 403) {
+          const count403 = (state.retry403Counts && state.retry403Counts.get(rotateKey)) || 0;
+          if (count403 < 2) {
+            state.retry403Counts.set(rotateKey, count403 + 1);
+            return this.openGenerateStream(
+              {
+                ...params,
+                wireContents: resolvedWireContents,
+                model: targetModel,
+                cookies: auth.cookies,
+                g1Tier: resolvedTier,
               },
               state,
             );
@@ -2003,9 +2039,10 @@ function createRelayServer(options = {}) {
           return sendJson(res, 404, { ok: false, alive: false, error: '未找到该账号' });
         }
         const t0 = Date.now();
+        const probeNum = (t0 % 89) + 10;
         try {
           const testRes = await relayClient.callGenerateContent({
-            wireContents: [[[[null, '1+1=']], 'user']],
+            wireContents: [[[[null, `${probeNum}+1=`]], 'user']],
             model: 'models/gemini-3.5-flash-lite',
             generationConfig: {
               maxOutputTokens: 64,
@@ -2019,6 +2056,11 @@ function createRelayServer(options = {}) {
           });
           entry.status = 'ready';
           entry.lastError = null;
+          if (relayClient.accountStore.cookieStore && typeof relayClient.accountStore.cookieStore.save === 'function') {
+            try {
+              relayClient.accountStore.cookieStore.save(entry);
+            } catch {}
+          }
           return sendJson(res, 200, {
             ok: true,
             alive: true,
@@ -2027,13 +2069,36 @@ function createRelayServer(options = {}) {
             reply: (testRes.parsed.text || '').trim().slice(0, 60),
           });
         } catch (err) {
-          entry.lastError = err.message;
+          const msg = String((err && err.message) || '');
+          const isQuota429 =
+            (err && err.httpStatus === 429) ||
+            msg.includes('HTTP 429') ||
+            msg.includes('Quota exceeded') ||
+            msg.includes('usage limit');
+          if (isQuota429) {
+            entry.status = 'ready';
+            entry.lastError = null;
+            if (relayClient.accountStore.cookieStore && typeof relayClient.accountStore.cookieStore.save === 'function') {
+              try {
+                relayClient.accountStore.cookieStore.save(entry);
+              } catch {}
+            }
+            return sendJson(res, 200, {
+              ok: true,
+              alive: true,
+              quota429: true,
+              model: 'gemini-3.5-flash-lite',
+              elapsedMs: Date.now() - t0,
+              reply: '凭证有效（当前模型今日配额已满）',
+            });
+          }
+          entry.lastError = msg;
           return sendJson(res, 200, {
             ok: true,
             alive: false,
             model: 'gemini-3.5-flash-lite',
             elapsedMs: Date.now() - t0,
-            error: err.message,
+            error: msg,
           });
         }
       }
@@ -2047,6 +2112,7 @@ function createRelayServer(options = {}) {
         { id: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash Lite' },
         { id: 'gemini-3.5-flash-lite-high', displayName: 'Gemini 3.5 Flash Lite (High Thinking)' },
         { id: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro Preview' },
+        { id: 'gemini-3.1-pro-preview-high', displayName: 'Gemini 3.1 Pro Preview (High Thinking)' },
         { id: 'gemini-nano-banana-2.1', displayName: 'Nano Banana 2.1' },
         { id: 'gemini-3.1-flash-image', displayName: 'Nano Banana 2 (Gemini 3.1 Flash Image)' },
         { id: 'gemini-3.1-flash-lite-image', displayName: 'Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)' },

@@ -66,7 +66,9 @@ async function rotateGoogleCookies(cookieMap, options = {}) {
   if (
     !cookieMap.has('LSID') &&
     !cookieMap.has('__Host-1PLSID') &&
-    !cookieMap.has('__Host-3PLSID')
+    !cookieMap.has('__Host-3PLSID') &&
+    !cookieMap.has('__Secure-1PSIDTS') &&
+    !cookieMap.has('__Secure-3PSIDTS')
   ) {
     return { ok: false, status: 0, updated: [], skipped: 'missing_lsid' };
   }

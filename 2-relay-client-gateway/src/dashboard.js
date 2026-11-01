@@ -941,7 +941,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
     </div>
     <div class="kv-row">
       <span class="kv-label">Models:</span>
-      <code class="box">gemini-4-argon(-high) / gemini-3.8-flash(-high) / gemini-3.5-flash-lite(-high) / gemini-nano-banana-2.1 / gemini-3.1-flash-image / gemini-3.1-flash-lite-image / gemini-3-pro-image</code>
+      <code class="box">gemini-4-argon(-high) / gemini-3.8-flash(-high) / gemini-3.5-flash-lite(-high) / gemini-3.1-pro-preview(-high) / gemini-nano-banana-2.1 / gemini-3.1-flash-image / gemini-3.1-flash-lite-image / gemini-3-pro-image</code>
     </div>
     <pre id="curl-example"></pre>
   </div>
@@ -999,6 +999,9 @@ function renderTestBadge(accountId) {
   const r = testResults[accountId];
   if (!r) return '';
   if (r.loading) return '<span class="pill amber" style="margin-right:6px;">TESTING...</span>';
+  if (r.quota429) {
+    return '<span class="pill green" style="margin-right:6px;" title="凭证有效（当前模型今日配额已满）">429 OK · ' + r.elapsedMs + 'ms</span>';
+  }
   if (r.alive) return '<span class="pill green" style="margin-right:6px;">OK · ' + r.elapsedMs + 'ms</span>';
   const shortErr = (r.error || '未知错误').slice(0, 42).replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return '<span class="pill err" style="margin-right:6px;" title="' + (r.error || '').replace(/"/g, '&quot;') + '">ERR · ' + shortErr + '</span>';
@@ -1110,6 +1113,8 @@ async function testAcc(accountId) {
     testResults[accountId] = {
       loading: false,
       alive: !!data.alive,
+      quota429: !!data.quota429,
+      reply: data.reply || '',
       elapsedMs: data.elapsedMs || 0,
       error: data.error || ''
     };
