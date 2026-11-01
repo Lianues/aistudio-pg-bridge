@@ -1922,6 +1922,18 @@ function readJsonBody(req, maxBytes = 8 * 1024 * 1024) {
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
+  // SSE 已经发过响应头时不能再 writeHead（否则抛 ERR_HTTP_HEADERS_SENT 直接崩进程）。
+  // 此时降级为一条 SSE 错误帧 + [DONE]，让客户端仍能拿到结构化错误。
+  if (res.headersSent || res.writableEnded) {
+    if (!res.writableEnded) {
+      try {
+        res.write(`data: ${body}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } catch {}
+    }
+    return;
+  }
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
@@ -2549,6 +2561,11 @@ function createRelayServer(options = {}) {
       return sendJson(res, 404, { error: { message: `Route not found: ${req.method} ${pathname}` } });
     } catch (err) {
       const status = err.httpStatus || 500;
+      if (res.headersSent) {
+        console.warn(
+          `[relay] 流式响应中途出错 (${status}): ${err && err.message ? err.message : String(err)}`,
+        );
+      }
       if (err && err.officialError) {
         return sendJson(res, status, err.officialError);
       }
