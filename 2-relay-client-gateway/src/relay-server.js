@@ -1089,11 +1089,7 @@ function parseSingleMakerSuiteFrame(frame) {
 
   const u = frame[2];
   if (Array.isArray(u)) {
-    usage = {
-      promptTokenCount: Number(u[0] ?? 0),
-      candidatesTokenCount: Number(u[1] ?? 0),
-      totalTokenCount: Number(u[2] ?? 0),
-    };
+    usage = parseUsageMetadata(u);
   }
 
   return {
@@ -1105,6 +1101,136 @@ function parseSingleMakerSuiteFrame(frame) {
     geminiParts,
     finishReasonCode,
     usage,
+  };
+}
+
+const MODALITY_NAME_MAP = {
+  1: 'TEXT',
+  2: 'IMAGE',
+  3: 'VIDEO',
+  4: 'AUDIO',
+  5: 'DOCUMENT',
+};
+
+function parseModalityTokenDetails(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const out = [];
+  for (const item of arr) {
+    if (!Array.isArray(item)) continue;
+    const modality = MODALITY_NAME_MAP[Number(item[0])] || 'MODALITY_UNSPECIFIED';
+    const tokenCount = Number(item[1] ?? 0);
+    out.push({ modality, tokenCount });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/**
+ * Parse MakerSuite `UsageMetadata` (`_.Kv` = `frame[2]`):
+ *   u[0] (field 1):  promptTokenCount
+ *   u[1] (field 2):  candidatesTokenCount
+ *   u[2] (field 3):  totalTokenCount
+ *   u[3] (field 4):  cachedContentTokenCount
+ *   u[4] (field 5):  promptTokensDetails      (`repeated ModalityTokenCount` `_.co`)
+ *   u[5] (field 6):  cacheTokensDetails       (`repeated ModalityTokenCount` `_.co`)
+ *   u[6] (field 7):  candidatesTokensDetails  (`repeated ModalityTokenCount` `_.co`)
+ *   u[7] (field 8):  toolUsePromptTokenCount
+ *   u[8] (field 9):  toolUsePromptTokensDetails (`repeated ModalityTokenCount` `_.co`)
+ *   u[9] (field 10): thoughtsTokenCount
+ */
+function parseUsageMetadata(u) {
+  if (!Array.isArray(u)) return null;
+  const promptTokenCount = Number(u[0] ?? 0);
+  const candidatesTokenCount = Number(u[1] ?? 0);
+  const totalTokenCount = Number(u[2] ?? 0);
+  const cachedContentTokenCount = u[3] != null ? Number(u[3]) : null;
+  const promptTokensDetails = parseModalityTokenDetails(u[4]);
+  const cacheTokensDetails = parseModalityTokenDetails(u[5]);
+  const candidatesTokensDetails = parseModalityTokenDetails(u[6]);
+  const toolUsePromptTokenCount = u[7] != null ? Number(u[7]) : null;
+  const toolUsePromptTokensDetails = parseModalityTokenDetails(u[8]);
+  const thoughtsTokenCount = u[9] != null ? Number(u[9]) : null;
+
+  return {
+    promptTokenCount,
+    candidatesTokenCount,
+    totalTokenCount,
+    ...(cachedContentTokenCount !== null ? { cachedContentTokenCount } : {}),
+    ...(toolUsePromptTokenCount !== null ? { toolUsePromptTokenCount } : {}),
+    ...(thoughtsTokenCount !== null ? { thoughtsTokenCount } : {}),
+    ...(promptTokensDetails ? { promptTokensDetails } : {}),
+    ...(cacheTokensDetails ? { cacheTokensDetails } : {}),
+    ...(candidatesTokensDetails ? { candidatesTokensDetails } : {}),
+    ...(toolUsePromptTokensDetails ? { toolUsePromptTokensDetails } : {}),
+  };
+}
+
+function buildGeminiUsageMetadata(usage) {
+  const u = usage || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
+  const out = {
+    promptTokenCount: Number(u.promptTokenCount ?? 0),
+    candidatesTokenCount: Number(u.candidatesTokenCount ?? 0),
+    totalTokenCount: Number(u.totalTokenCount ?? 0),
+  };
+  if (u.cachedContentTokenCount != null) out.cachedContentTokenCount = Number(u.cachedContentTokenCount);
+  if (u.toolUsePromptTokenCount != null) out.toolUsePromptTokenCount = Number(u.toolUsePromptTokenCount);
+  if (u.thoughtsTokenCount != null) out.thoughtsTokenCount = Number(u.thoughtsTokenCount);
+  if (Array.isArray(u.promptTokensDetails) && u.promptTokensDetails.length > 0) {
+    out.promptTokensDetails = u.promptTokensDetails;
+  }
+  if (Array.isArray(u.cacheTokensDetails) && u.cacheTokensDetails.length > 0) {
+    out.cacheTokensDetails = u.cacheTokensDetails;
+  }
+  if (Array.isArray(u.candidatesTokensDetails) && u.candidatesTokensDetails.length > 0) {
+    out.candidatesTokensDetails = u.candidatesTokensDetails;
+  }
+  if (Array.isArray(u.toolUsePromptTokensDetails) && u.toolUsePromptTokensDetails.length > 0) {
+    out.toolUsePromptTokensDetails = u.toolUsePromptTokensDetails;
+  }
+  return out;
+}
+
+function buildOpenAIUsage(usage) {
+  const u = usage || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
+  const promptTokens = Number(u.promptTokenCount ?? 0) + Number(u.toolUsePromptTokenCount ?? 0);
+  const candidatesTokens = Number(u.candidatesTokenCount ?? 0);
+  const reasoningTokens = Number(u.thoughtsTokenCount ?? 0);
+  const cachedTokens = Number(u.cachedContentTokenCount ?? 0);
+  const completionTokens = candidatesTokens + reasoningTokens;
+  const totalTokens = Number(u.totalTokenCount ?? 0) || promptTokens + completionTokens;
+
+  const promptDetails = {
+    cached_tokens: cachedTokens,
+  };
+  if (Array.isArray(u.promptTokensDetails)) {
+    for (const item of u.promptTokensDetails) {
+      if (!item || !item.modality) continue;
+      const key = `${String(item.modality).toLowerCase()}_tokens`;
+      promptDetails[key] = (promptDetails[key] || 0) + Number(item.tokenCount ?? 0);
+    }
+  }
+  if (u.toolUsePromptTokenCount != null) {
+    promptDetails.tool_use_tokens = Number(u.toolUsePromptTokenCount);
+  }
+
+  const completionDetails = {
+    reasoning_tokens: reasoningTokens,
+  };
+  if (Array.isArray(u.candidatesTokensDetails) && u.candidatesTokensDetails.length > 0) {
+    for (const item of u.candidatesTokensDetails) {
+      if (!item || !item.modality) continue;
+      const key = `${String(item.modality).toLowerCase()}_tokens`;
+      completionDetails[key] = (completionDetails[key] || 0) + Number(item.tokenCount ?? 0);
+    }
+  } else {
+    completionDetails.text_tokens = candidatesTokens;
+  }
+
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
+    prompt_tokens_details: promptDetails,
+    completion_tokens_details: completionDetails,
   };
 }
 
@@ -1339,11 +1465,7 @@ function toOpenAIChatCompletion(parsed, model) {
             : 'stop',
       },
     ],
-    usage: {
-      prompt_tokens: parsed.usage.promptTokenCount,
-      completion_tokens: parsed.usage.candidatesTokenCount,
-      total_tokens: parsed.usage.totalTokenCount,
-    },
+    usage: buildOpenAIUsage(parsed.usage),
   };
 }
 
@@ -1399,11 +1521,7 @@ function toGeminiResponse(parsed, model) {
         index: 0,
       },
     ],
-    usageMetadata: {
-      promptTokenCount: parsed.usage.promptTokenCount,
-      candidatesTokenCount: parsed.usage.candidatesTokenCount,
-      totalTokenCount: parsed.usage.totalTokenCount,
-    },
+    usageMetadata: buildGeminiUsageMetadata(parsed.usage),
     modelVersion: String(model || 'gemini-3.8-flash').replace(/^models\//, ''),
   };
 }
@@ -2503,11 +2621,7 @@ function createRelayServer(options = {}) {
             choices: [{ index: 0, delta: {}, finish_reason: lastFinishReason }],
             ...(lastUsage
               ? {
-                  usage: {
-                    prompt_tokens: lastUsage.promptTokenCount,
-                    completion_tokens: lastUsage.candidatesTokenCount,
-                    total_tokens: lastUsage.totalTokenCount,
-                  },
+                  usage: buildOpenAIUsage(lastUsage),
                 }
               : {}),
           };
@@ -2576,7 +2690,6 @@ function createRelayServer(options = {}) {
             ({ geminiParts, finishReasonCode, usage }) => {
               if ((!geminiParts || geminiParts.length === 0) && !usage) return;
               ensureGeminiHeaders();
-              const u = usage || { promptTokenCount: 0, candidatesTokenCount: 0, totalTokenCount: 0 };
               const chunk = {
                 candidates: [
                   {
@@ -2588,11 +2701,7 @@ function createRelayServer(options = {}) {
                     index: 0,
                   },
                 ],
-                usageMetadata: {
-                  promptTokenCount: u.promptTokenCount,
-                  candidatesTokenCount: u.candidatesTokenCount,
-                  totalTokenCount: u.totalTokenCount,
-                },
+                usageMetadata: buildGeminiUsageMetadata(usage),
                 modelVersion: cleanModel,
               };
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
