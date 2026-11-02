@@ -1555,7 +1555,7 @@ class WaaRelayClient {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
   }
 
-  async requestProof({ cookies, authUser, g1Tier, model, wireContents, generationConfig }) {
+  async requestProof({ cookies, authUser, g1Tier, model, wireContents, generationConfig, forceRefresh }) {
     const min = extractMinimalCookies(cookies || this.defaultCookies);
     if (min.map.size === 0) {
       throw new Error('No valid Google cookies provided to Relay Client');
@@ -1570,6 +1570,7 @@ class WaaRelayClient {
         model: model || this.defaultModel,
         wireContents,
         generationConfig,
+        ...(forceRefresh ? { forceRefresh: true } : {}),
       }),
     });
     const data = await res.json();
@@ -1670,6 +1671,7 @@ class WaaRelayClient {
       model: targetModel,
       wireContents: resolvedWireContents,
       generationConfig,
+      forceRefresh: Boolean(params.forceRefresh),
     });
 
     // The signer only returns the proof: cookies + Authorization stay local.
@@ -1838,6 +1840,7 @@ class WaaRelayClient {
                   model: targetModel,
                   cookies: rotated,
                   g1Tier: resolvedTier,
+                  forceRefresh: true,
                 },
                 state,
               );
@@ -1853,6 +1856,7 @@ class WaaRelayClient {
                 model: targetModel,
                 cookies: auth.cookies,
                 g1Tier: resolvedTier,
+                forceRefresh: true,
               },
               state,
             );
