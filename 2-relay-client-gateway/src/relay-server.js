@@ -1676,6 +1676,22 @@ class WaaRelayClient {
         }
 
         if (res.status === 403) {
+          if (!state.rotatedAccounts.has(rotateKey)) {
+            state.rotatedAccounts.add(rotateKey);
+            const rotated = await this.rotateAccountCookies(auth.cookies, auth.authUser);
+            if (rotated) {
+              return this.openGenerateStream(
+                {
+                  ...params,
+                  wireContents: resolvedWireContents,
+                  model: targetModel,
+                  cookies: rotated,
+                  g1Tier: resolvedTier,
+                },
+                state,
+              );
+            }
+          }
           const count403 = (state.retry403Counts && state.retry403Counts.get(rotateKey)) || 0;
           if (count403 < 2) {
             state.retry403Counts.set(rotateKey, count403 + 1);
@@ -2579,6 +2595,20 @@ function createRelayServer(options = {}) {
     }
   });
 
+  const rotateAllAccounts = async () => {
+    try {
+      for (const entry of relayClient.accountStore.accounts.values()) {
+        if (entry && entry.cookies) {
+          await relayClient.rotateAccountCookies(entry.cookies, entry.authUser);
+        }
+      }
+    } catch {}
+  };
+  const rotateTimer = setInterval(rotateAllAccounts, 540_000);
+  if (rotateTimer && typeof rotateTimer.unref === 'function') {
+    rotateTimer.unref();
+  }
+
   return {
     relayClient,
     server,
@@ -2596,6 +2626,7 @@ function createRelayServer(options = {}) {
       };
     },
     async close() {
+      clearInterval(rotateTimer);
       await new Promise((resolve) => server.close(() => resolve()));
     },
   };
