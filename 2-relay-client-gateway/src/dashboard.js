@@ -83,13 +83,21 @@ function currentQuotaBucket(now = Date.now()) {
   return new Date(now - 7 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
-function computeAccountId(cookieMap, authUser = 0) {
-  const anchor =
+function computeSessionAnchor(cookieMap) {
+  if (!cookieMap || typeof cookieMap.get !== 'function') return '';
+  return (
     cookieMap.get('SAPISID') ||
     cookieMap.get('__Secure-3PAPISID') ||
     cookieMap.get('__Secure-1PAPISID') ||
     cookieMap.get('SID') ||
     cookieMap.get('__Secure-3PSID') ||
+    ''
+  );
+}
+
+function computeAccountId(cookieMap, authUser = 0) {
+  const anchor =
+    computeSessionAnchor(cookieMap) ||
     Array.from(cookieMap.values()).join(';');
   const digest = crypto
     .createHash('sha256')
@@ -163,6 +171,9 @@ class RelayAccountStore {
           );
           const restored = this.accounts.get(pub.accountId);
           if (restored) {
+            if (data.updatedAt) {
+              restored.updatedAt = Number(data.updatedAt) || restored.updatedAt;
+            }
             const curBucket = currentQuotaBucket();
             if (data.dailyBucket === curBucket) {
               restored.dailyBucket = curBucket;
@@ -185,7 +196,51 @@ class RelayAccountStore {
     } finally {
       this._loading = false;
     }
+    this.syncSiblingSessions();
     return loaded;
+  }
+
+  /**
+   * Synchronize multi-login sibling accounts (`u/0, u/1, u/2, u/3`) that share
+   * the same browser session (`SAPISID` / `SID`) so all siblings inherit the
+   * most complete and most recently updated rolling cookies (`__Secure-*PSIDTS` / `SIDCC`).
+   */
+  syncSiblingSessions() {
+    const groups = new Map();
+    for (const entry of this.accounts.values()) {
+      const min = extractMinimalCookies(entry.cookies);
+      const anchor = computeSessionAnchor(min.map);
+      if (!anchor) continue;
+      if (!groups.has(anchor)) groups.set(anchor, []);
+      groups.get(anchor).push({ entry, min });
+    }
+    for (const group of groups.values()) {
+      if (group.length <= 1) continue;
+      group.sort((a, b) => {
+        const aHasTs = a.min.map.has('__Secure-1PSIDTS') || a.min.map.has('__Secure-3PSIDTS') ? 1 : 0;
+        const bHasTs = b.min.map.has('__Secure-1PSIDTS') || b.min.map.has('__Secure-3PSIDTS') ? 1 : 0;
+        if (bHasTs !== aHasTs) return bHasTs - aHasTs;
+        return (Number(b.entry.updatedAt) || 0) - (Number(a.entry.updatedAt) || 0);
+      });
+      const bestMap = new Map();
+      for (let i = group.length - 1; i >= 0; i -= 1) {
+        for (const [k, v] of group[i].min.map.entries()) {
+          if (v) bestMap.set(k, v);
+        }
+      }
+      const bestHeader = Array.from(bestMap.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join('; ');
+      const bestNames = Array.from(bestMap.keys());
+      for (const { entry } of group) {
+        if (entry.cookies !== bestHeader) {
+          entry.cookies = bestHeader;
+          entry.cookieCount = bestMap.size;
+          entry.cookieNames = bestNames;
+          this.persist(entry);
+        }
+      }
+    }
   }
 
   /** Persist a single account entry (no-op when persistence is disabled). */
@@ -292,6 +347,33 @@ class RelayAccountStore {
       'TIER0';
     const curBucket = currentQuotaBucket(now);
     const sameBucket = existing && existing.dailyBucket === curBucket;
+    const anchor = computeSessionAnchor(min.map);
+    if (!this._loading && anchor) {
+      let newestSib = null;
+      for (const sib of this.accounts.values()) {
+        if (sib.accountId === accountId) continue;
+        const sibMin = extractMinimalCookies(sib.cookies);
+        if (computeSessionAnchor(sibMin.map) !== anchor) continue;
+        for (const [k, v] of sibMin.map.entries()) {
+          if (!min.map.has(k) && v) min.map.set(k, v);
+        }
+        if (
+          (sibMin.map.has('__Secure-1PSIDTS') || sibMin.map.has('__Secure-3PSIDTS')) &&
+          (!newestSib || (Number(sib.updatedAt) || 0) > (Number(newestSib.entry.updatedAt) || 0))
+        ) {
+          newestSib = { entry: sib, map: sibMin.map };
+        }
+      }
+      if (newestSib && newestSib.entry.lastUsedAt > 0) {
+        for (const k of ['__Secure-1PSIDTS', '__Secure-3PSIDTS', 'SIDCC', '__Secure-1PSIDCC', '__Secure-3PSIDCC']) {
+          if (newestSib.map.has(k)) min.map.set(k, newestSib.map.get(k));
+        }
+      }
+      min.header = Array.from(min.map.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join('; ');
+    }
+
     const entry = {
       accountId,
       authUser: resolvedAuthUser,
@@ -327,7 +409,8 @@ class RelayAccountStore {
   }
 
   /**
-   * Replace an account's cookies in place.
+   * Replace an account's cookies in place (and synchronize all multi-login
+   * sibling accounts `u/0..u/N` that share the same `SAPISID` / `SID` session).
    * Used after a local `RotateCookies` refresh or a `Set-Cookie` update, so the
    * next request starts from the refreshed set instead of the stale one.
    */
@@ -335,16 +418,32 @@ class RelayAccountStore {
     const oldMin = extractMinimalCookies(rawInput);
     if (oldMin.map.size === 0) return null;
     const accountId = computeAccountId(oldMin.map, Number(authUser || 0));
-    const entry = this.accounts.get(accountId);
-    if (!entry) return null;
     const min = extractMinimalCookies(newCookies);
     if (min.map.size === 0) return null;
-    entry.cookies = min.header;
-    entry.cookieCount = min.map.size;
-    entry.cookieNames = Array.from(min.map.keys());
-    entry.updatedAt = Date.now();
-    this.persist(entry);
-    return this.toPublicView(entry);
+    const anchor = computeSessionAnchor(min.map) || computeSessionAnchor(oldMin.map);
+    const now = Date.now();
+    let targetEntry = this.accounts.get(accountId) || null;
+    for (const sib of this.accounts.values()) {
+      const sibMin = extractMinimalCookies(sib.cookies);
+      const isTarget = sib.accountId === accountId;
+      const isSibling = Boolean(anchor && computeSessionAnchor(sibMin.map) === anchor);
+      if (!isTarget && !isSibling) continue;
+      const mergedMap = new Map([...sibMin.map, ...min.map]);
+      const mergedHeader = Array.from(mergedMap.entries())
+        .map(([k, v]) => `${k}=${v}`)
+        .join('; ');
+      sib.cookies = mergedHeader;
+      sib.cookieCount = mergedMap.size;
+      sib.cookieNames = Array.from(mergedMap.keys());
+      sib.updatedAt = now;
+      if (sib.status === 'error' && String(sib.lastError || '').includes('401')) {
+        sib.status = 'ready';
+        sib.lastError = null;
+      }
+      this.persist(sib);
+      if (isTarget) targetEntry = sib;
+    }
+    return targetEntry ? this.toPublicView(targetEntry) : null;
   }
 
   countReady() {
@@ -1143,6 +1242,7 @@ setInterval(refreshStatus, 5000);
 module.exports = {
   MINIMAL_COOKIE_WHITELIST,
   extractMinimalCookies,
+  computeSessionAnchor,
   computeAccountId,
   resolveModelAlias,
   RelayAccountStore,

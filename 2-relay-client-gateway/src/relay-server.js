@@ -11,6 +11,7 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const {
   extractMinimalCookies,
+  computeSessionAnchor,
   computeAccountId,
   resolveModelAlias,
   RelayAccountStore,
@@ -1477,11 +1478,43 @@ class WaaRelayClient {
   async rotateAccountCookies(rawCookies, authUser) {
     const min = extractMinimalCookies(rawCookies || '');
     if (min.map.size === 0) return null;
+    const store = this.accountStore;
     const result = await rotateGoogleCookies(min.map, { userAgent: this.userAgent });
-    if (!result.ok || !result.updated || result.updated.length === 0) return null;
-    const header = toCookieHeader(min.map);
-    this.updateStoredCookies(rawCookies, authUser, header);
-    return header;
+    if (result.ok) {
+      const header = toCookieHeader(min.map);
+      this.updateStoredCookies(rawCookies, authUser, header);
+      if (result.updated && result.updated.length > 0) {
+        return header;
+      }
+    }
+    const anchor = computeSessionAnchor(min.map);
+    if (anchor && store && store.accounts) {
+      const origHeader = toCookieHeader(extractMinimalCookies(rawCookies || '').map);
+      const siblings = [];
+      for (const sib of store.accounts.values()) {
+        if (!sib || !sib.cookies) continue;
+        const sibMin = extractMinimalCookies(sib.cookies);
+        if (computeSessionAnchor(sibMin.map) !== anchor) continue;
+        if (toCookieHeader(sibMin.map) === origHeader) continue;
+        siblings.push({ sib, sibMin });
+      }
+      siblings.sort((a, b) => {
+        const aHasTs = a.sibMin.map.has('__Secure-1PSIDTS') || a.sibMin.map.has('__Secure-3PSIDTS') ? 1 : 0;
+        const bHasTs = b.sibMin.map.has('__Secure-1PSIDTS') || b.sibMin.map.has('__Secure-3PSIDTS') ? 1 : 0;
+        if (bHasTs !== aHasTs) return bHasTs - aHasTs;
+        return (Number(b.sib.updatedAt) || 0) - (Number(a.sib.updatedAt) || 0);
+      });
+      for (const { sibMin } of siblings) {
+        const sibMap = new Map([...min.map, ...sibMin.map]);
+        const sibResult = await rotateGoogleCookies(sibMap, { userAgent: this.userAgent });
+        if (sibResult.ok) {
+          const header = toCookieHeader(sibMap);
+          this.updateStoredCookies(rawCookies, authUser, header);
+          return header;
+        }
+      }
+    }
+    return null;
   }
 
   async openGenerateStream(params, retryState = null) {
@@ -2597,8 +2630,14 @@ function createRelayServer(options = {}) {
 
   const rotateAllAccounts = async () => {
     try {
+      const seenAnchors = new Set();
       for (const entry of relayClient.accountStore.accounts.values()) {
         if (entry && entry.cookies) {
+          const anchor = computeSessionAnchor(extractMinimalCookies(entry.cookies).map);
+          if (anchor) {
+            if (seenAnchors.has(anchor)) continue;
+            seenAnchors.add(anchor);
+          }
           await relayClient.rotateAccountCookies(entry.cookies, entry.authUser);
         }
       }
