@@ -13,9 +13,31 @@
    - 第一行 **配置模式（Config mode）** 切换为 **高级（Advanced）**
    - 向下滚动至 **安全（Security）** 区域
    - 将 **脚本 Cookie 访问权限（Script cookies access）** 从默认的 `All but HttpOnly` 改为 **`All`（所有）**。
-3. **开启 Chrome 扩展「允许用户脚本」开关（Chrome 138+）**：
-   - 打开 `chrome://extensions/?id=dhdgffkkebhmkfjojejmpbldmpobfkfo`
-   - 打开 **允许用户脚本（Allow User Scripts）**。
+3. **开启 Chrome 扩展「允许用户脚本」与「无痕模式」开关（Chrome 138+ / Edge）**：
+   - 打开 `chrome://extensions/?id=dhdgffkkebhmkfjojejmpbldmpobfkfo`（Edge 为 `edge://extensions/`）
+   - 打开 **允许用户脚本（Allow User Scripts）**
+   - 打开 **在无痕模式下启用（Allow in Incognito）** / **在 InPrivate 中允许**。
+
+---
+
+## 关于 Cookie 的正确抓法，以避免失效 401 问题
+
+**强烈建议使用无痕模式（Incognito / InPrivate）抓取：**
+
+1. 先打开篡改猴的管理扩展页面，打开 **「在 InPrivate 中允许 / 在无痕模式下启用」**（若使用抓包法提取则无需此步）。
+2. 新建无痕窗口（`Ctrl + Shift + N`），在无痕窗口里面完成 AI Studio 官网登录和 Cookie 抓取即可。
+3. **抓完后直接点击无痕窗口右上角 `×` 关闭窗口（千万不要在网页里点「退出账号 / Sign out」）**。
+
+这里有以下两种做法：
+* **做法一（推荐）**：一个无痕窗口只登录一个账号，抓一个 Cookie；抓完一个账号之后关闭该无痕窗口，再新建一个新的无痕窗口，重复抓新账号 Cookie。
+* **做法二**：**先在单个无痕窗口里一次性把所有账号全部登录完**，然后再抓一个账号切换一个账号；**不要退出账号，且必须一次性登录完所有要抓的号**，全部抓完后直接关闭无痕窗口。
+
+### 为什么不用无痕模式抓的 Cookie 会突然失效？
+
+* 如果你不用无痕模式，而是用平常使用的浏览器窗口抓 Cookie：
+  - 在一段时间后，你平常使用的窗口里打开 Google 相关页面时，浏览器后台也会自动刷新该会话的滚动 Cookie（`__Secure-1PSIDTS` / `SIDCC`）；
+  - 由于反代服务端用的也是这个窗口的同一套会话，两边同时刷新会导致之前抓的 Cookie 被顶掉失效，从而报 `401`。
+* 使用无痕窗口抓完并直接关掉无痕窗口后，该会话仅由反代服务端独自持有续期，即便你日常窗口继续登录使用同一个谷歌账号，两边也是不同的独立会话，不会互相影响。
 
 ---
 
