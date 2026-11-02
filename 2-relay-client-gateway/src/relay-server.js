@@ -2663,6 +2663,8 @@ function createRelayServer(options = {}) {
           const tools = body.tools || null;
           const cleanModel = String(model || relayClient.defaultModel).replace(/^models\//, '');
           let geminiHeadersSent = false;
+          let sawFinishReason = false;
+          let lastGeminiUsage = null;
           const ensureGeminiHeaders = () => {
             if (geminiHeadersSent) return;
             geminiHeadersSent = true;
@@ -2688,26 +2690,49 @@ function createRelayServer(options = {}) {
               fromStore: !!auth.fromStore,
             },
             ({ geminiParts, finishReasonCode, usage }) => {
-              if ((!geminiParts || geminiParts.length === 0) && !usage) return;
+              if ((!geminiParts || geminiParts.length === 0) && finishReasonCode == null && !usage) return;
+              if (usage) lastGeminiUsage = usage;
+              const hasParts = Array.isArray(geminiParts) && geminiParts.length > 0;
+              const hasFinish = finishReasonCode !== null && finishReasonCode !== undefined;
+              // Skip pure provisional usage-only frames that carry neither parts nor finishReason
+              if (!hasParts && !hasFinish) return;
               ensureGeminiHeaders();
+              const candidate = {
+                content: {
+                  role: 'model',
+                  parts: hasParts ? geminiParts : [{ text: '' }],
+                },
+                index: 0,
+              };
+              if (hasFinish) {
+                sawFinishReason = true;
+                candidate.finishReason = FINISH_REASON_MAP[finishReasonCode] || 'STOP';
+              }
               const chunk = {
-                candidates: [
-                  {
-                    content: {
-                      role: 'model',
-                      parts: geminiParts && geminiParts.length > 0 ? geminiParts : [{ text: '' }],
-                    },
-                    finishReason: FINISH_REASON_MAP[finishReasonCode ?? 1] || 'STOP',
-                    index: 0,
-                  },
-                ],
-                usageMetadata: buildGeminiUsageMetadata(usage),
+                candidates: [candidate],
+                ...(hasFinish || usage
+                  ? { usageMetadata: buildGeminiUsageMetadata(usage || lastGeminiUsage) }
+                  : {}),
                 modelVersion: cleanModel,
               };
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
             },
           );
           ensureGeminiHeaders();
+          if (!sawFinishReason) {
+            const finalChunk = {
+              candidates: [
+                {
+                  content: { role: 'model', parts: [{ text: '' }] },
+                  finishReason: 'STOP',
+                  index: 0,
+                },
+              ],
+              usageMetadata: buildGeminiUsageMetadata(lastGeminiUsage),
+              modelVersion: cleanModel,
+            };
+            res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+          }
           return res.end();
         }
 
