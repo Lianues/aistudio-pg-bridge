@@ -23,6 +23,11 @@ const {
   applySetCookies,
   toCookieHeader,
 } = require('./cookie-rotate');
+const {
+  fetchWithSystemProxyFallback,
+  resolveSystemProxyInfo,
+  getSystemProxyInfo,
+} = require('./system-proxy');
 
 const GENERATE_CONTENT_URL =
   'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent';
@@ -1560,7 +1565,7 @@ class WaaRelayClient {
     if (min.map.size === 0) {
       throw new Error('No valid Google cookies provided to Relay Client');
     }
-    const res = await globalThis.fetch(`${this.proofServerUrl}/v1/proof/mint`, {
+    const res = await fetchWithSystemProxyFallback(`${this.proofServerUrl}/v1/proof/mint`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1733,7 +1738,7 @@ class WaaRelayClient {
     const tRpc0 = Date.now();
     let res;
     try {
-      res = await globalThis.fetch(this.generateContentUrl, {
+      res = await fetchWithSystemProxyFallback(this.generateContentUrl, {
         method: 'POST',
         headers: reqHeaders,
         body: wireBody,
@@ -2150,7 +2155,7 @@ async function fetchAccountPoolInfo(relayClient, entry) {
     const url = `${relayClient.proofServerUrl}/v1/pool/stats?authUser=${encodeURIComponent(
       entry.authUser ?? 0,
     )}`;
-    const res = await globalThis.fetch(url, {
+    const res = await fetchWithSystemProxyFallback(url, {
       headers: { 'X-Google-Cookies': entry.cookies },
       signal: AbortSignal.timeout(4000),
     });

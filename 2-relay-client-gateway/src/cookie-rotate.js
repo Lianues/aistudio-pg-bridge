@@ -10,6 +10,8 @@
  * applySetCookies / toCookieHeader).
  */
 
+const { fetchWithSystemProxyFallback } = require('./system-proxy');
+
 const ACCOUNT_HOST_ONLY_COOKIES = new Set([
   'LSID',
   '__Host-1PLSID',
@@ -76,7 +78,7 @@ async function rotateGoogleCookies(cookieMap, options = {}) {
     options.userAgent ||
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
   try {
-    const res = await globalThis.fetch('https://accounts.google.com/RotateCookies', {
+    const res = await fetchWithSystemProxyFallback('https://accounts.google.com/RotateCookies', {
       method: 'POST',
       headers: {
         cookie: toCookieHeader(cookieMap),
