@@ -2347,6 +2347,10 @@ function createRelayServer(options = {}) {
           body.g1Tier || null,
           'manual',
         );
+        const addedEntry = relayClient.accountStore.accounts.get(pubAcc.accountId);
+        if (addedEntry && addedEntry.cookies) {
+          relayClient.rotateAccountCookies(addedEntry.cookies, addedEntry.authUser).catch(() => {});
+        }
         return sendJson(res, 200, { ok: true, account: pubAcc });
       }
 
@@ -2766,22 +2770,36 @@ function createRelayServer(options = {}) {
     }
   });
 
-  const rotateAllAccounts = async () => {
+  let rotatingAll = false;
+  const rotateAllAccounts = async (forceAll = false) => {
+    if (rotatingAll) return;
+    rotatingAll = true;
     try {
+      const now = Date.now();
       const seenAnchors = new Set();
       for (const entry of relayClient.accountStore.accounts.values()) {
         if (entry && entry.cookies) {
+          if (!forceAll && entry.lastRotatedAt && now - entry.lastRotatedAt < 240_000) {
+            continue;
+          }
           const anchor = computeSessionAnchor(extractMinimalCookies(entry.cookies).map);
           if (anchor) {
             if (seenAnchors.has(anchor)) continue;
             seenAnchors.add(anchor);
           }
           await relayClient.rotateAccountCookies(entry.cookies, entry.authUser);
+          entry.lastRotatedAt = Date.now();
         }
       }
-    } catch {}
+    } catch {} finally {
+      rotatingAll = false;
+    }
   };
-  const rotateTimer = setInterval(rotateAllAccounts, 540_000);
+  const startupRotateTimer = setTimeout(() => rotateAllAccounts(true), 3_000);
+  if (startupRotateTimer && typeof startupRotateTimer.unref === 'function') {
+    startupRotateTimer.unref();
+  }
+  const rotateTimer = setInterval(() => rotateAllAccounts(false), 60_000);
   if (rotateTimer && typeof rotateTimer.unref === 'function') {
     rotateTimer.unref();
   }
