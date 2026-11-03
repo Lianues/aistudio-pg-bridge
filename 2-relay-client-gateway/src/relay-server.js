@@ -1635,11 +1635,15 @@ class WaaRelayClient {
    * Rotate the account cookies locally (accounts.google.com/RotateCookies).
    * Returns the refreshed cookie header, or null when rotation was skipped/failed.
    */
-  async rotateAccountCookies(rawCookies, authUser) {
+  async rotateAccountCookies(rawCookies, authUser, info = null) {
     const min = extractMinimalCookies(rawCookies || '');
     if (min.map.size === 0) return null;
     const store = this.accountStore;
     const result = await rotateGoogleCookies(min.map, { userAgent: this.userAgent });
+    if (info) {
+      info.status = result.status;
+      info.updated = result.updated || [];
+    }
     if (result.ok) {
       const header = toCookieHeader(min.map);
       this.updateStoredCookies(rawCookies, authUser, header);
@@ -2869,12 +2873,19 @@ function createRelayServer(options = {}) {
             seenAnchors.add(anchor);
           }
           const beforeTs = extractMinimalCookies(entry.cookies).map.get('__Secure-1PSIDTS') || '';
-          await relayClient.rotateAccountCookies(entry.cookies, entry.authUser);
+          const rotInfo = {};
+          await relayClient.rotateAccountCookies(entry.cookies, entry.authUser, rotInfo);
           entry.lastRotatedAt = Date.now();
+          // 401 from RotateCookies == this PSIDTS chain was superseded elsewhere
+          // (browser tab or a second rotation source). The credential is dead.
+          if (rotInfo.status === 401) {
+            relayClient.markAccountExpired(entry.cookies, entry.authUser);
+            continue;
+          }
           const afterTs = extractMinimalCookies(entry.cookies).map.get('__Secure-1PSIDTS') || '';
           // Rotation only refreshes SIDCC; when PSIDTS didn't move and AI Studio
           // already reports the session as signed out, stop touching it.
-          if (afterTs && beforeTs && afterTs === beforeTs) {
+          if (rotInfo.status === 200 && afterTs && beforeTs && afterTs === beforeTs) {
             const probe = await relayClient.probeAiStudioSession(entry.cookies);
             if (!probe.alive) {
               relayClient.markAccountExpired(entry.cookies, entry.authUser);
