@@ -2776,7 +2776,7 @@ function createRelayServer(options = {}) {
       for (const entry of relayClient.accountStore.accounts.values()) {
         if (entry && entry.cookies) {
           const lastTs = Number(entry.lastRotatedAt || entry.updatedAt || entry.addedAt || 0);
-          if (!forceAll && lastTs && now - lastTs < 240_000) {
+          if (!forceAll && lastTs && now - lastTs < 420_000) {
             continue;
           }
           const anchor = computeSessionAnchor(extractMinimalCookies(entry.cookies).map);
