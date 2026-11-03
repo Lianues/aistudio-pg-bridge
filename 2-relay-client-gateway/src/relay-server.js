@@ -2347,10 +2347,6 @@ function createRelayServer(options = {}) {
           body.g1Tier || null,
           'manual',
         );
-        const addedEntry = relayClient.accountStore.accounts.get(pubAcc.accountId);
-        if (addedEntry && addedEntry.cookies) {
-          relayClient.rotateAccountCookies(addedEntry.cookies, addedEntry.authUser).catch(() => {});
-        }
         return sendJson(res, 200, { ok: true, account: pubAcc });
       }
 
@@ -2779,7 +2775,8 @@ function createRelayServer(options = {}) {
       const seenAnchors = new Set();
       for (const entry of relayClient.accountStore.accounts.values()) {
         if (entry && entry.cookies) {
-          if (!forceAll && entry.lastRotatedAt && now - entry.lastRotatedAt < 240_000) {
+          const lastTs = Number(entry.lastRotatedAt || entry.updatedAt || entry.addedAt || 0);
+          if (!forceAll && lastTs && now - lastTs < 240_000) {
             continue;
           }
           const anchor = computeSessionAnchor(extractMinimalCookies(entry.cookies).map);
@@ -2795,7 +2792,7 @@ function createRelayServer(options = {}) {
       rotatingAll = false;
     }
   };
-  const startupRotateTimer = setTimeout(() => rotateAllAccounts(true), 3_000);
+  const startupRotateTimer = setTimeout(() => rotateAllAccounts(false), 3_000);
   if (startupRotateTimer && typeof startupRotateTimer.unref === 'function') {
     startupRotateTimer.unref();
   }

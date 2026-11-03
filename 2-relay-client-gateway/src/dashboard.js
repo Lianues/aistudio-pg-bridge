@@ -173,6 +173,7 @@ class RelayAccountStore {
           if (restored) {
             if (data.updatedAt) {
               restored.updatedAt = Number(data.updatedAt) || restored.updatedAt;
+              restored.lastRotatedAt = restored.updatedAt;
             }
             const curBucket = currentQuotaBucket();
             if (data.dailyBucket === curBucket) {
@@ -385,6 +386,7 @@ class RelayAccountStore {
       status: 'ready',
       addedAt: existing ? existing.addedAt : now,
       updatedAt: now,
+      lastRotatedAt: now,
       lastUsedAt: existing ? existing.lastUsedAt : 0,
       dailyBucket: curBucket,
       requestsCount: sameBucket ? existing.requestsCount || 0 : 0,
@@ -436,6 +438,7 @@ class RelayAccountStore {
       sib.cookieCount = mergedMap.size;
       sib.cookieNames = Array.from(mergedMap.keys());
       sib.updatedAt = now;
+      sib.lastRotatedAt = now;
       if (sib.status === 'error' && String(sib.lastError || '').includes('401')) {
         sib.status = 'ready';
         sib.lastError = null;
