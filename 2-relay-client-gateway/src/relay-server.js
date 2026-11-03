@@ -46,6 +46,42 @@ const SKIP_THOUGHT_SIG_VALIDATOR_B64 = Buffer.from(
   'utf8',
 ).toString('base64');
 
+const AISTUDIO_HOME_URL = 'https://aistudio.google.com/';
+const EXPIRED_SESSION_REASON = 'AI Studio 会话已失效（需重新导出 Cookie）';
+
+/**
+ * Cheap liveness probe for a Google cookie set.
+ *
+ * `aistudio.google.com/` answers 200 for a live session and 302 → `/welcome`
+ * for a dead one (SID alive but the AI Studio session is gone). Everything
+ * else (429, 5xx, network failure) is treated as ALIVE so a transient hiccup
+ * can never mark a working credential as dead.
+ */
+async function probeAiStudioSession(cookieHeader) {
+  if (!cookieHeader) return { alive: false, reason: 'no_cookies' };
+  try {
+    const res = await fetchWithSystemProxyFallback(AISTUDIO_HOME_URL, {
+      method: 'GET',
+      headers: {
+        cookie: cookieHeader,
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36',
+      },
+      redirect: 'manual',
+    });
+    const loc = res.headers.get('location') || '';
+    if (res.status >= 300 && res.status < 400) {
+      return /\/welcome\b/.test(loc)
+        ? { alive: false, reason: 'signed_out' }
+        : { alive: true, reason: 'redirect' };
+    }
+    if (res.status === 200) return { alive: true, reason: 'ok' };
+    return { alive: true, reason: `http_${res.status}` };
+  } catch (err) {
+    return { alive: true, reason: `probe_error:${err.message}` };
+  }
+}
+
 const FINISH_REASON_MAP = {
   0: 'FINISH_REASON_UNSPECIFIED',
   1: 'STOP',
@@ -1641,6 +1677,36 @@ class WaaRelayClient {
     return null;
   }
 
+  /**
+   * Flag every sibling of a dead session so the panel shows the real reason and
+   * the rotation timer stops burning RotateCookies calls on it.
+   */
+  markAccountExpired(rawCookies, authUser, reason = EXPIRED_SESSION_REASON) {
+    const store = this.accountStore;
+    if (!store || !store.accounts) return 0;
+    const min = extractMinimalCookies(rawCookies || '');
+    const anchor = computeSessionAnchor(min.map);
+    const now = Date.now();
+    let touched = 0;
+    for (const entry of store.accounts.values()) {
+      if (!entry || !entry.cookies) continue;
+      const entryMin = extractMinimalCookies(entry.cookies);
+      const sameAnchor = anchor && computeSessionAnchor(entryMin.map) === anchor;
+      if (!sameAnchor && Number(entry.authUser ?? 0) !== Number(authUser ?? 0)) continue;
+      entry.status = 'error';
+      entry.lastError = reason;
+      entry.expiredAt = now;
+      touched += 1;
+      if (typeof store.persist === 'function') store.persist(entry);
+    }
+    return touched;
+  }
+
+  /** Public wrapper so the rotation loop can probe without re-implementing it. */
+  probeAiStudioSession(cookieHeader) {
+    return probeAiStudioSession(cookieHeader);
+  }
+
   async openGenerateStream(params, retryState = null) {
     const {
       payload,
@@ -1819,17 +1885,29 @@ class WaaRelayClient {
         const rotateKey = accountId || 'default';
         if (res.status === 401 && !state.rotatedAccounts.has(rotateKey)) {
           state.rotatedAccounts.add(rotateKey);
-          const rotated = await this.rotateAccountCookies(auth.cookies, auth.authUser);
-          if (rotated) {
-            return this.openGenerateStream(
-              {
-                ...params,
-                wireContents: resolvedWireContents,
-                model: targetModel,
-                cookies: rotated,
-              },
-              state,
-            );
+          // A 401 usually means the AI Studio session itself is gone; rotating
+          // such a cookie set can't revive it and looks like token replay to
+          // Google. Probe first, only rotate a session that is still alive.
+          const beforeTs = extractMinimalCookies(auth.cookies || '').map.get('__Secure-1PSIDTS') || '';
+          const probe = await probeAiStudioSession(auth.cookies);
+          if (!probe.alive) {
+            this.markAccountExpired(auth.cookies, auth.authUser);
+          } else {
+            const rotated = await this.rotateAccountCookies(auth.cookies, auth.authUser);
+            const afterTs = rotated
+              ? extractMinimalCookies(rotated).map.get('__Secure-1PSIDTS') || ''
+              : '';
+            if (rotated && afterTs && afterTs !== beforeTs) {
+              return this.openGenerateStream(
+                {
+                  ...params,
+                  wireContents: resolvedWireContents,
+                  model: targetModel,
+                  cookies: rotated,
+                },
+                state,
+              );
+            }
           }
         }
 
@@ -2780,6 +2858,7 @@ function createRelayServer(options = {}) {
       const seenAnchors = new Set();
       for (const entry of relayClient.accountStore.accounts.values()) {
         if (entry && entry.cookies) {
+          if (entry.expiredAt) continue;
           const lastTs = Number(entry.lastRotatedAt || entry.updatedAt || entry.addedAt || 0);
           if (!forceAll && lastTs && now - lastTs < 420_000) {
             continue;
@@ -2789,8 +2868,18 @@ function createRelayServer(options = {}) {
             if (seenAnchors.has(anchor)) continue;
             seenAnchors.add(anchor);
           }
+          const beforeTs = extractMinimalCookies(entry.cookies).map.get('__Secure-1PSIDTS') || '';
           await relayClient.rotateAccountCookies(entry.cookies, entry.authUser);
           entry.lastRotatedAt = Date.now();
+          const afterTs = extractMinimalCookies(entry.cookies).map.get('__Secure-1PSIDTS') || '';
+          // Rotation only refreshes SIDCC; when PSIDTS didn't move and AI Studio
+          // already reports the session as signed out, stop touching it.
+          if (afterTs && beforeTs && afterTs === beforeTs) {
+            const probe = await relayClient.probeAiStudioSession(entry.cookies);
+            if (!probe.alive) {
+              relayClient.markAccountExpired(entry.cookies, entry.authUser);
+            }
+          }
         }
       }
     } catch {} finally {

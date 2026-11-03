@@ -18,6 +18,8 @@
 const crypto = require('node:crypto');
 const { CookieStore } = require('./cookie-store');
 
+const EXPIRED_ERROR_TEXT = 'AI Studio 会话已失效（需重新导出 Cookie）';
+
 const MINIMAL_COOKIE_WHITELIST = new Set([
   'SID',
   'HSID',
@@ -173,7 +175,12 @@ class RelayAccountStore {
           if (restored) {
             if (data.updatedAt) {
               restored.updatedAt = Number(data.updatedAt) || restored.updatedAt;
-              restored.lastRotatedAt = restored.updatedAt;
+              restored.lastRotatedAt = Number(data.lastRotatedAt) || restored.updatedAt;
+            }
+            if (data.expiredAt) {
+              restored.expiredAt = Number(data.expiredAt) || Date.now();
+              restored.status = 'error';
+              restored.lastError = data.lastError || EXPIRED_ERROR_TEXT;
             }
             const curBucket = currentQuotaBucket();
             if (data.dailyBucket === curBucket) {
