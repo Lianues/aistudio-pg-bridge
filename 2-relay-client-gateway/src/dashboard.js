@@ -744,6 +744,26 @@ async function submitLogin(e) {
 </html>`;
 }
 
+// 网页模型清单：包装模式在前，统一带 (防外审截断-) 前缀
+const DASHBOARD_TEXT_MODELS = [
+  'gemini-4-argon(-high)',
+  'gemini-3.8-flash(-high)',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash-lite(-high)',
+  'gemini-3.1-pro-preview(-high)',
+];
+const DASHBOARD_IMAGE_MODELS = [
+  'gemini-nano-banana-2.1',
+  'gemini-3.1-flash-image',
+  'gemini-3.1-flash-lite-image',
+  'gemini-3-pro-image',
+];
+const DASHBOARD_MODEL_LIST = [
+  ...DASHBOARD_TEXT_MODELS.map((m) => `(防外审截断-)${m}`),
+  ...DASHBOARD_TEXT_MODELS,
+  ...DASHBOARD_IMAGE_MODELS,
+].join(' / ');
+
 function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1050,7 +1070,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
     </div>
     <div class="kv-row">
       <span class="kv-label">Models:</span>
-      <code class="box">gemini-4-argon(-high) / gemini-3.8-flash(-high) / gemini-3.5-flash-lite(-high) / gemini-3.1-pro-preview(-high) / gemini-nano-banana-2.1 / gemini-3.1-flash-image / gemini-3.1-flash-lite-image / gemini-3-pro-image</code>
+      <code class="box">${DASHBOARD_MODEL_LIST}</code>
     </div>
     <pre id="curl-example"></pre>
   </div>
