@@ -1862,6 +1862,19 @@ class WaaRelayClient {
     this.accountStore =
       options.accountStore ||
       new RelayAccountStore({ storageDir: resolveCookiesDir(options.cookiesDir) });
+    // Fill missing `email` / `gaiaId` labels in the background (never blocks boot).
+    if (this.accountStore && typeof this.accountStore.backfillIdentities === 'function') {
+      setTimeout(() => {
+        this.accountStore
+          .backfillIdentities({ limit: 60 })
+          .then((r) => {
+            if (r && (r.filled || r.failed)) {
+              console.log(`[relay] 账号邮箱回填完成: +${r.filled} 成功 / ${r.failed} 未取到`);
+            }
+          })
+          .catch(() => {});
+      }, 4000).unref?.();
+    }
     if (this.defaultCookies) {
       try {
         this.accountStore.addAccount(this.defaultCookies, this.defaultAuthUser, null, 'startup');
@@ -2748,17 +2761,85 @@ function createRelayServer(options = {}) {
         });
       }
 
+      if (req.method === 'POST' && (pathname === '/api/accounts/preview' || pathname === '/v1/accounts/preview')) {
+        if (!isPanelAuthenticated(req, url, apiKey)) {
+          return sendJson(res, 401, { ok: false, error: 'Unauthorized: 请先使用 API Key 登录面板' });
+        }
+        const body = await readJsonBody(req);
+        try {
+          const accounts = await relayClient.accountStore.previewAccountsFromSession(body.cookies || body, {
+            g1Tier: body.g1Tier || null,
+          });
+          return sendJson(res, 200, { ok: true, accounts, count: accounts.length });
+        } catch (err) {
+          return sendJson(res, 400, { ok: false, error: err.message });
+        }
+      }
+
+      if (req.method === 'POST' && (pathname === '/api/accounts/identify' || pathname === '/v1/accounts/identify')) {
+        if (!isPanelAuthenticated(req, url, apiKey)) {
+          return sendJson(res, 401, { ok: false, error: 'Unauthorized: 请先使用 API Key 登录面板' });
+        }
+        const store = relayClient.accountStore;
+        const body = await readJsonBody(req).catch(() => ({}));
+        let targets = [];
+        if (body && body.accountId) {
+          const one = store.accounts.get(body.accountId);
+          if (!one) return sendJson(res, 404, { ok: false, error: '未找到该账号' });
+          targets = [one];
+        } else {
+          targets = Array.from(store.accounts.values()).filter((e) => !e.email || body.force === true);
+        }
+        const results = [];
+        for (const entry of targets.slice(0, 80)) {
+          const who = await store.identifyAccount(entry.accountId);
+          results.push({
+            accountId: entry.accountId,
+            authUser: entry.authUser,
+            ok: Boolean(who && who.ok),
+            email: entry.email || null,
+            gaiaId: entry.gaiaId || null,
+            dead: Boolean(who && who.dead),
+          });
+        }
+        return sendJson(res, 200, { ok: true, updated: results.filter((x) => x.ok && x.email).length, results });
+      }
+
       if (req.method === 'POST' && (pathname === '/api/accounts/add' || pathname === '/v1/accounts/add')) {
         if (!isPanelAuthenticated(req, url, apiKey)) {
           return sendJson(res, 401, { ok: false, error: 'Unauthorized: 请先使用 API Key 登录面板' });
         }
         const body = await readJsonBody(req);
-        const pubAcc = relayClient.accountStore.addAccount(
+        const store = relayClient.accountStore;
+        const wantAuto =
+          body.autoAuthUser === true || body.authUser === -1 || body.authUser === 'auto';
+        if (wantAuto) {
+          try {
+            const out = await store.addAccountsFromSession(body.cookies || body, {
+              g1Tier: body.g1Tier || null,
+              source: 'manual',
+              onlyAuthUsers: Array.isArray(body.authUsers) ? body.authUsers : null,
+              identities: Array.isArray(body.identities) ? body.identities : null,
+            });
+            return sendJson(res, 200, {
+              ok: true,
+              autoDetected: true,
+              added: out.accounts.length,
+              account: out.accounts[0] || null,
+              accounts: out.accounts,
+            });
+          } catch (err) {
+            return sendJson(res, 400, { ok: false, error: err.message });
+          }
+        }
+        const pubAcc = store.addAccount(
           body.cookies || body,
           body.authUser ?? 0,
           body.g1Tier || null,
           'manual',
+          body.identity || null,
         );
+        store.identifyAccount(pubAcc.accountId).catch(() => {});
         return sendJson(res, 200, { ok: true, account: pubAcc });
       }
 

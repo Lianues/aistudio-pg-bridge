@@ -59,7 +59,7 @@ class CookieStore {
       return out;
     }
     for (const name of names) {
-      if (!name.toLowerCase().endsWith('.json')) continue;
+      if (!name.toLowerCase().endsWith('.json') || name === 'users.json') continue;
       const file = path.join(this.dir, name);
       try {
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -82,6 +82,10 @@ class CookieStore {
     const payload = {
       accountId: entry.accountId,
       authUser: entry.authUser,
+      email: entry.email || null,
+      gaiaId: entry.gaiaId || null,
+      sessionDead: Boolean(entry.sessionDead),
+      overwrittenAt: entry.overwrittenAt || null,
       g1Tier: entry.g1Tier || 'TIER0',
       source: entry.source || 'manual',
       addedAt: entry.addedAt,

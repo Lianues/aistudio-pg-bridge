@@ -20,6 +20,10 @@ const { CookieStore } = require('./cookie-store');
 
 const EXPIRED_ERROR_TEXT = 'AI Studio 会话已失效（需重新导出 Cookie）';
 
+// UA used only for the identity probe (plain HTML GET, no BotGuard involved).
+const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
+
 const MINIMAL_COOKIE_WHITELIST = new Set([
   'SID',
   'HSID',
@@ -109,6 +113,58 @@ function computeAccountId(cookieMap, authUser = 0) {
   return `acc_${digest}`;
 }
 
+/**
+ * Resolve one sub-account's Google identity (email + Gaia ID) from the AI Studio
+ * shell HTML.  Google multi-login keeps a single `SID`/`SAPISID` session and
+ * routes sub-accounts purely by the `/u/<n>/` path (and `X-Goog-AuthUser`), so
+ * the same cookie string yields a different identity per index.
+ * Returns `{ ok: true, email, gaiaId }`, or `{ ok: false }` when the index does
+ * not exist (the page 302-redirects back to `/u/0/`).
+ */
+async function probeAccountIdentity(cookies, authUser, opts = {}) {
+  const u = Number(authUser) || 0;
+  const url = `https://aistudio.google.com/u/${u}/prompts/new_chat`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'user-agent': opts.userAgent || DEFAULT_USER_AGENT,
+        cookie: cookies,
+        'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(opts.timeoutMs || 12000),
+    });
+    if (res.status !== 200) {
+      const location = res.headers.get('location') || '';
+      // 302 back to `/u/0/` = this index does not exist in the session;
+      // 302 to ServiceLogin / /welcome = the cookie itself is dead.
+      const missing = /\/u\/0\//.test(location) && u !== 0;
+      const dead = !missing && /ServiceLogin|\/welcome|accounts\.google\.com/.test(location);
+      return { ok: false, status: res.status, authUser: u, location, missing, dead };
+    }
+    const html = await res.text();
+    const email = (html.match(/"oPEP7c":"([^"]+)"/) || [])[1]
+      || (html.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/) || [])[0]
+      || '';
+    const gaiaId = (html.match(/"qDCSke":"(\d+)"/) || [])[1] || '';
+    return { ok: true, status: 200, authUser: u, email, gaiaId };
+  } catch (err) {
+    return { ok: false, status: 0, authUser: u, error: err && err.message };
+  }
+}
+
+/** Probe `u/0 … u/N` until the first index that does not exist. */
+async function probeSessionAccounts(cookies, opts = {}) {
+  const max = Math.max(1, Math.min(Number(opts.maxAccounts) || 8, 20));
+  const out = [];
+  for (let u = 0; u < max; u += 1) {
+    const who = await probeAccountIdentity(cookies, u, opts);
+    if (!who.ok) break;
+    out.push(who);
+  }
+  return out;
+}
+
 function resolveModelAlias(modelInput, fallback = 'models/gemini-3.8-flash') {
   const raw = String(modelInput || '')
     .trim()
@@ -177,6 +233,8 @@ class RelayAccountStore {
               restored.updatedAt = Number(data.updatedAt) || restored.updatedAt;
               restored.lastRotatedAt = Number(data.lastRotatedAt) || restored.updatedAt;
             }
+            if (data.email) restored.email = String(data.email);
+            if (data.gaiaId) restored.gaiaId = String(data.gaiaId);
             if (data.expiredAt) {
               restored.expiredAt = Number(data.expiredAt) || Date.now();
               restored.status = 'error';
@@ -268,7 +326,7 @@ class RelayAccountStore {
    *   - Raw Cookie string (`SID=...; SAPISID=...`)
    *   - Full cURL command snippet
    */
-  addAccount(rawInput, authUser = 0, g1Tier = null, source = 'manual') {
+  addAccount(rawInput, authUser = 0, g1Tier = null, source = 'manual', identity = null) {
     let text = '';
     let jsonAuthUser = null;
     let jsonTier = null;
@@ -344,8 +402,32 @@ class RelayAccountStore {
       );
     }
 
-    const accountId = computeAccountId(min.map, resolvedAuthUser);
+    let accountId = computeAccountId(min.map, resolvedAuthUser);
     const now = Date.now();
+    // Identity-based overwrite: two browser windows logging into the SAME Google
+    // account produce different `SAPISID` sessions (hence different accountId),
+    // but the same Gaia ID / email.  Match on identity first so a re-import
+    // overwrites the old cookies while inheriting the old counters.
+    let matchedBy = null;
+    if (identity && (identity.gaiaId || identity.email)) {
+      for (const cand of this.accounts.values()) {
+        if (identity.gaiaId && cand.gaiaId && cand.gaiaId === String(identity.gaiaId)) {
+          matchedBy = cand;
+          break;
+        }
+        if (
+          !identity.gaiaId &&
+          identity.email &&
+          cand.email &&
+          String(cand.email).toLowerCase() === String(identity.email).toLowerCase() &&
+          Number(cand.authUser ?? 0) === Number(resolvedAuthUser ?? 0)
+        ) {
+          matchedBy = cand;
+          break;
+        }
+      }
+    }
+    if (matchedBy) accountId = matchedBy.accountId;
     const existing = this.accounts.get(accountId);
     const resolvedTier =
       jsonTier ||
@@ -385,6 +467,10 @@ class RelayAccountStore {
     const entry = {
       accountId,
       authUser: resolvedAuthUser,
+      email: (existing && existing.email) || (identity && identity.email) || null,
+      gaiaId: (existing && existing.gaiaId) || (identity && identity.gaiaId) || null,
+      sessionDead: false,
+      overwrittenAt: matchedBy ? now : (existing && existing.overwrittenAt) || null,
       g1Tier: resolvedTier,
       cookies: min.header,
       cookieCount: min.map.size,
@@ -400,6 +486,24 @@ class RelayAccountStore {
       dailyModelCounts: sameBucket && existing.dailyModelCounts ? { ...existing.dailyModelCounts } : {},
       lastError: null,
     };
+    // Fold any stale duplicate of the same Google account into this entry.
+    if (entry.gaiaId) {
+      for (const [otherId, other] of Array.from(this.accounts.entries())) {
+        if (otherId === accountId) continue;
+        if (!other.gaiaId || other.gaiaId !== entry.gaiaId) continue;
+        entry.requestsCount = (entry.requestsCount || 0) + (other.requestsCount || 0);
+        if (other.dailyBucket === entry.dailyBucket && other.dailyModelCounts) {
+          for (const [m, c] of Object.entries(other.dailyModelCounts)) {
+            entry.dailyModelCounts[m] = (entry.dailyModelCounts[m] || 0) + Number(c || 0);
+          }
+        }
+        entry.addedAt = Math.min(entry.addedAt || now, other.addedAt || now);
+        this.accounts.delete(otherId);
+        if (this.cookieStore) {
+          try { this.cookieStore.remove(otherId); } catch {}
+        }
+      }
+    }
     this.accounts.set(accountId, entry);
     this.persist(entry);
     return this.toPublicView(entry);
@@ -415,6 +519,132 @@ class RelayAccountStore {
       }
     }
     return removed;
+  }
+
+  /**
+   * Resolve (and persist) the Google identity of one stored account.
+   * `email` / `gaiaId` come from the AI Studio shell page for `u/<authUser>`.
+   */
+  async identifyAccount(accountId, opts = {}) {
+    const entry = this.accounts.get(accountId);
+    if (!entry) return null;
+    const who = await probeAccountIdentity(entry.cookies, entry.authUser, opts);
+    if (who.ok) {
+      entry.email = who.email || entry.email || null;
+      entry.gaiaId = who.gaiaId || entry.gaiaId || null;
+      entry.sessionDead = false;
+      this.persist(entry);
+    } else if (who.dead) {
+      // 302 -> accounts.google.com/ServiceLogin: the stored cookie is dead.
+      entry.sessionDead = true;
+      this.persist(entry);
+    }
+    return { accountId, authUser: entry.authUser, ...who };
+  }
+
+  /**
+   * Lazily fill `email` / `gaiaId` for accounts that already exist on disk.
+   * Runs in the background (sequential, so Google is not hammered) and stops
+   * after `limit` lookups or `deadlineMs`, whichever comes first.
+   */
+  async backfillIdentities(opts = {}) {
+    const limit = Math.max(0, Number(opts.limit) || 40);
+    const deadline = Date.now() + (Number(opts.deadlineMs) || 120000);
+    let done = 0;
+    let failed = 0;
+    for (const entry of this.accounts.values()) {
+      if (done + failed >= limit || Date.now() > deadline) break;
+      if (entry.email) continue;
+      const who = await probeAccountIdentity(entry.cookies, entry.authUser, opts);
+      if (who.ok) {
+        entry.email = who.email || null;
+        entry.gaiaId = who.gaiaId || null;
+        if (entry.email) {
+          this.persist(entry);
+          done += 1;
+        } else {
+          failed += 1;
+        }
+      } else {
+        failed += 1;
+      }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return { filled: done, failed };
+  }
+
+  /**
+   * Import one browser session that has several Google accounts signed in.
+   *
+   * Google multi-login shares `SID` / `SAPISID` / `*PSIDTS` across every account
+   * in the session and separates them only by the `u/<n>` path (a.k.a. the
+   * `X-Goog-AuthUser` header).  So a single cookie export can be expanded into
+   * `u/0 … u/N` accounts, each enriched with its own email + Gaia ID.
+   */
+  /**
+   * Probe a browser session WITHOUT writing anything, so the UI can show a
+   * checkbox list (email + accountId) before the user commits the import.
+   */
+  async previewAccountsFromSession(rawInput, opts = {}) {
+    const text = typeof rawInput === 'string' ? rawInput : String((rawInput && rawInput.cookies) || '');
+    const min = extractMinimalCookies(text);
+    if (min.map.size === 0) throw new Error('未检测到有效的 Google Cookie');
+    const identities = opts.identities || (await probeSessionAccounts(min.header, opts));
+    const byGaia = new Map();
+    for (const e of this.accounts.values()) {
+      if (e.gaiaId) byGaia.set(String(e.gaiaId), e);
+    }
+    return identities.map((who) => {
+      const u = Number(who.authUser) || 0;
+      const accountId = computeAccountId(min.map, u);
+      const prev = (who.gaiaId && byGaia.get(String(who.gaiaId))) || this.accounts.get(accountId) || null;
+      return {
+        authUser: u,
+        email: who.email || null,
+        gaiaId: who.gaiaId || null,
+        accountId: prev ? prev.accountId : accountId,
+        alive: true,
+        overwrite: Boolean(prev),
+        prevRequests: prev ? Number(prev.requestsCount || 0) : 0,
+        prevAddedAt: prev ? prev.addedAt : null,
+      };
+    });
+  }
+
+  async addAccountsFromSession(rawInput, opts = {}) {
+    const text = typeof rawInput === 'string' ? rawInput : String((rawInput && rawInput.cookies) || '');
+    const min = extractMinimalCookies(text);
+    // The dashboard sends back the list it previewed (no `ok` flag); treat a
+    // missing flag as alive, and only skip entries explicitly marked dead.
+    const rawIdentities = (Array.isArray(opts.identities) && opts.identities.length)
+      ? opts.identities
+      : await probeSessionAccounts(min.header, opts);
+    const identities = rawIdentities.map((w) => (w && w.ok === undefined ? { ...w, ok: true } : w));
+    const only = Array.isArray(opts.onlyAuthUsers) && opts.onlyAuthUsers.length
+      ? new Set(opts.onlyAuthUsers.map((n) => Number(n)))
+      : null;
+    const added = [];
+    for (const who of identities) {
+      if (!who || !who.ok) continue;
+      const u = Number(who.authUser) || 0;
+      if (only && !only.has(u)) continue;
+      const pub = this.addAccount(
+        { cookies: text, authUser: u, g1Tier: opts.g1Tier || null },
+        u,
+        opts.g1Tier || null,
+        opts.source || 'manual',
+        { email: who.email || null, gaiaId: who.gaiaId || null },
+      );
+      const entry = this.accounts.get(pub.accountId);
+      if (entry) {
+        if (who.email) entry.email = who.email;
+        if (who.gaiaId) entry.gaiaId = who.gaiaId;
+        entry.sessionDead = false;
+        this.persist(entry);
+      }
+      added.push({ ...pub, email: (entry && entry.email) || who.email || null, gaiaId: (entry && entry.gaiaId) || who.gaiaId || null });
+    }
+    return { accounts: added, probed: identities.length, selected: added.length };
   }
 
   /**
@@ -524,6 +754,10 @@ class RelayAccountStore {
     return {
       accountId: entry.accountId,
       authUser: entry.authUser,
+      email: entry.email || null,
+      gaiaId: entry.gaiaId || null,
+      sessionDead: Boolean(entry.sessionDead),
+      overwrittenAt: entry.overwrittenAt || null,
       g1Tier: entry.g1Tier || 'TIER0',
       cookieCount: entry.cookieCount,
       cookieNames: entry.cookieNames,
@@ -542,6 +776,14 @@ class RelayAccountStore {
   listPublic() {
     return Array.from(this.accounts.values()).map((e) => this.toPublicView(e));
   }
+}
+
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function renderLoginHtml() {
@@ -704,41 +946,6 @@ function toggleTheme() {
   document.documentElement.setAttribute('data-theme', next);
   localStorage.setItem('aispg_theme', next);
 }
-async function submitLogin(e) {
-  e.preventDefault();
-  const key = document.getElementById('login-key').value.trim();
-  const errEl = document.getElementById('login-err');
-  const btn = document.getElementById('login-btn');
-  if (!key) {
-    errEl.style.display = 'block';
-    errEl.textContent = '请输入 API Key';
-    return;
-  }
-  errEl.style.display = 'none';
-  btn.disabled = true;
-  btn.textContent = '验证中...';
-  try {
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: key })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) {
-      errEl.style.display = 'block';
-      errEl.textContent = data.error || 'API Key 错误';
-      btn.disabled = false;
-      btn.textContent = '验证并进入面板 →';
-      return;
-    }
-    window.location.reload();
-  } catch (err) {
-    errEl.style.display = 'block';
-    errEl.textContent = '网络请求失败: ' + err.message;
-    btn.disabled = false;
-    btn.textContent = '验证并进入面板 →';
-  }
-}
 </script>
 </body>
 </html>`;
@@ -764,13 +971,27 @@ const DASHBOARD_MODEL_LIST = [
   ...DASHBOARD_IMAGE_MODELS,
 ].join(' / ');
 
-function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
+function renderDashboardHtml({
+  apiKey,
+  defaultModel = 'gemini-3.8-flash',
+  user = null,
+  publicBaseUrl = 'https://aispg.spinsnow.fun',
+  stats24h = null,
+}) {
+  const cleanPublicBase = String(publicBaseUrl || 'https://aispg.spinsnow.fun').replace(/\/+$/, '');
+  const userName = user ? escapeHtml(user.globalName || user.username || user.discordId) : '';
+  const initMints24h =
+    stats24h && stats24h.mints24h != null ? Number(stats24h.mints24h).toLocaleString() : '—';
+  const initHotCookies24h =
+    stats24h && stats24h.hotCookies24h != null
+      ? Number(stats24h.hotCookies24h).toLocaleString()
+      : '—';
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>WAA RELAY // 本地中转网关</title>
+<title>AISPG // 专属中转网关</title>
 <style>
   :root {
     --bg: #fafafa;
@@ -844,7 +1065,8 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
   h1, h2 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
   .top-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
   .brand { display: flex; align-items: center; gap: 12px; }
-  .brand-title { font-size: 18px; font-weight: 700; letter-spacing: -0.03em; display: flex; align-items: center; gap: 10px; }
+  .brand-title { font-size: 18px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.2; }
+  .brand-sub { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.4; margin-top: 3px; }
   .poly-icon { width: 72px; height: 20px; stroke: var(--fg); fill: none; stroke-width: 1.5; stroke-linecap: square; stroke-linejoin: miter; }
   h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg); border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
   .pill {
@@ -877,6 +1099,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
   .stat-sub { font-size: 12px; color: var(--muted); margin-top: 4px; word-break: break-all; }
   .kv-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
   .kv-label { width: 140px; font-size: 12px; font-family: ui-monospace, monospace; text-transform: uppercase; color: var(--muted); flex-shrink: 0; }
+  .kv-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   code.box {
     background: var(--surface-sub);
     border: 1px solid var(--border);
@@ -957,6 +1180,8 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
     .grid { grid-template-columns: 1fr; gap: 10px; }
     .kv-row { flex-direction: column; align-items: stretch; gap: 6px; }
     .kv-label { width: auto; }
+    .kv-actions { width: 100%; }
+    .kv-actions button { flex: 1; }
     code.box { width: 100%; min-width: 0; }
     .import-bar { flex-direction: column; align-items: stretch; }
     .import-bar input[type="number"] { width: 100% !important; }
@@ -988,6 +1213,41 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
       text-align: left;
     }
   }
+  /* import picker */
+  #import-modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.45);
+    z-index: 999;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  #import-modal .modal-card {
+    background: var(--surface);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: min(640px, 100%);
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #import-modal .modal-head { padding: 14px 16px 8px; font-size: 13px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  #import-modal .modal-body { background: var(--surface); }
+  #import-modal .modal-foot { background: var(--surface-sub); }
+  #import-modal .import-row:hover { background: var(--surface-sub); }
+  #import-modal code { color: var(--fg); }
+  #import-modal .modal-body { padding: 8px 16px; overflow-y: auto; flex: 1; }
+  #import-modal .modal-foot { padding: 10px 16px 14px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); flex-wrap: wrap; }
+  .import-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px dashed var(--border); cursor: pointer; font-size: 12.5px; }
+  .import-row:last-child { border-bottom: none; }
+  .import-row input { width: auto; margin: 0; }
+  .import-mail { font-weight: 600; }
+  .import-meta { color: var(--muted); font-size: 11.5px; margin-left: auto; text-align: right; }
+  .import-meta em { color: #b26a00; font-style: normal; }
 </style>
 </head>
 <body>
@@ -996,12 +1256,19 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
     <div class="top-bar">
       <div class="brand">
         <svg class="poly-icon" viewBox="0 0 72 20"><polyline points="2,16 14,16 22,4 32,17 42,8 52,13 60,3 70,3"/></svg>
-        <div class="brand-title">WAA // RELAY GATEWAY</div>
+        <div>
+          <div class="brand-title">AISPG // GATEWAY</div>
+          <div class="brand-sub">
+            <div>近24h签名总次数：<span id="stat-mints-24h">${initMints24h}</span></div>
+            <div>近1h热池cookie数：<span id="stat-hot-cookies-24h">${initHotCookies24h}</span></div>
+          </div>
+        </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        ${userName ? `<span class="pill gray">@${userName}</span>` : ''}
         <span id="overall-badge" class="pill amber">检测中...</span>
-        <button class="secondary" onclick="toggleTheme()" id="theme-btn" style="padding:4px 10px;">◐ 主题</button>
-        <a href="/logout" class="btn secondary" style="padding:4px 10px;">退出</a>
+        <button class="secondary" onclick="toggleTheme()" style="padding:4px 10px;">◐ 主题</button>
+        ${userName ? `<a class="btn secondary" href="/auth/logout" style="padding:4px 10px;">退出</a>` : ''}
       </div>
     </div>
     <div class="grid">
@@ -1034,8 +1301,16 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
       <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">粘贴油猴脚本导出的 JSON、原始 Cookie 字符串或 cURL 命令：</div>
       <textarea id="manual-cookie" rows="3" placeholder='{"ok":true,"authUser":0,"g1Tier":"TIER1","cookies":"..."} 或 SID=...; SAPISID=...'></textarea>
       <div class="import-bar">
-        <button onclick="submitManualCookie()">+ 导入并保存</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;">
+          <input type="checkbox" id="auto-authuser" checked style="width:auto;margin:0;">
+          自动探测同会话多账号 (u/0…u/N)
+        </label>
+        <button id="import-btn" onclick="submitManualCookie()">+ 导入并保存</button>
       </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px;">
+      <button class="secondary" onclick="identifyAll()" id="identify-btn" style="padding:5px 12px;font-size:12px;">🔎 补全谷歌账号</button>
     </div>
 
     <div>
@@ -1043,6 +1318,7 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
         <thead>
           <tr>
             <th>账号 ID</th>
+            <th>谷歌账号</th>
             <th>等级 (Tier)</th>
             <th>AuthUser</th>
             <th>Cookie 数</th>
@@ -1052,21 +1328,45 @@ function renderDashboardHtml({ apiKey, defaultModel = 'gemini-3.8-flash' }) {
           </tr>
         </thead>
         <tbody id="accounts-tbody">
-          <tr><td colspan="7" style="text-align:center;color:var(--muted);justify-content:center;">暂无账号，请先导入 Cookie</td></tr>
+          <tr><td colspan="8" style="text-align:center;color:var(--muted);justify-content:center;">暂无账号，请先导入 Cookie</td></tr>
         </tbody>
       </table>
     </div>
   </div>
 
+  <div id="import-modal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div style="font-weight:600;margin-bottom:4px;">选择要导入的账号</div>
+        <div id="import-summary" style="color:var(--muted);font-size:12px;"></div>
+      </div>
+      <div class="modal-body" id="import-list"></div>
+      <div class="modal-foot">
+        <button class="secondary" onclick="toggleAllImports(true)">全选</button>
+        <button class="secondary" onclick="toggleAllImports(false)">全不选</button>
+        <button class="secondary" onclick="closeImportPicker()">取消</button>
+        <button onclick="confirmImport()">确认导入</button>
+      </div>
+    </div>
+  </div>
+
   <div class="card">
-    <h2>02 // OpenAI & Gemini 兼容接口</h2>
+    <h2>02 // 专属 OpenAI & Gemini 兼容接口</h2>
     <div class="kv-row">
       <span class="kv-label">OpenAI Base:</span>
-      <code class="box" id="oai-base-url"></code>
+      <code class="box" id="oai-base-url">${cleanPublicBase}/v1</code>
     </div>
     <div class="kv-row">
-      <span class="kv-label">API Key:</span>
-      <code class="box" id="oai-api-key">${apiKey}</code>
+      <span class="kv-label">Gemini Base:</span>
+      <code class="box" id="gemini-base-url">${cleanPublicBase}/v1beta</code>
+    </div>
+    <div class="kv-row">
+      <span class="kv-label">专属 API Key:</span>
+      <code class="box" id="oai-api-key">${escapeHtml(apiKey)}</code>
+      <div class="kv-actions">
+        <button class="secondary" onclick="copyApiKey()">复制 Key</button>
+        <button class="secondary" onclick="regenerateApiKey()">刷新 Key</button>
+      </div>
     </div>
     <div class="kv-row">
       <span class="kv-label">Models:</span>
@@ -1091,12 +1391,14 @@ function toggleTheme() {
   localStorage.setItem('aispg_theme', next);
 }
 
-const API_KEY = ${JSON.stringify(apiKey)};
+let API_KEY = ${JSON.stringify(apiKey)};
 const DEFAULT_MODEL = ${JSON.stringify(defaultModel)};
-const originUrl = window.location.origin;
-document.getElementById('oai-base-url').textContent = originUrl + '/v1';
-document.getElementById('curl-example').textContent =
-\`curl -N \${originUrl}/v1/chat/completions \\\\
+const PUBLIC_BASE = ${JSON.stringify(cleanPublicBase)};
+document.getElementById('oai-base-url').textContent = PUBLIC_BASE + '/v1';
+function updateKeyDisplay() {
+  document.getElementById('oai-api-key').textContent = API_KEY;
+  document.getElementById('curl-example').textContent =
+\`curl -N \${PUBLIC_BASE}/v1/chat/completions \\\\
   -H "Content-Type: application/json" \\\\
   -H "Authorization: Bearer ***" \\\\
   -d '{
@@ -1104,6 +1406,24 @@ document.getElementById('curl-example').textContent =
     "stream": true,
     "messages": [{"role": "user", "content": "你好，请介绍一下自己"}]
   }'\`;
+}
+updateKeyDisplay();
+
+function copyApiKey() {
+  navigator.clipboard.writeText(API_KEY);
+}
+
+async function regenerateApiKey() {
+  if (!confirm('确定要刷新专属 API Key 吗？刷新后旧 Key 将立即失效，您的 Cookie 会自动迁移到新 Key 下。')) return;
+  const res = await fetch('/api/key/regenerate', { method: 'POST' });
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    return alert('刷新 Key 失败: ' + (data.error || '未知错误'));
+  }
+  API_KEY = data.apiKey;
+  updateKeyDisplay();
+  refreshStatus();
+}
 
 function fmtRemain(ts) {
   if (!ts) return '';
@@ -1149,8 +1469,21 @@ function renderUsageHtml(a) {
 async function refreshStatus() {
   try {
     const res = await fetch('/api/status');
-    if (res.status === 401) return window.location.reload();
+    if (res.status === 401) {
+      window.location.reload();
+      return;
+    }
     const data = await res.json();
+    if (data.stats24h) {
+      const m24 = document.getElementById('stat-mints-24h');
+      const c24 = document.getElementById('stat-hot-cookies-24h');
+      if (m24 && data.stats24h.mints24h != null) {
+        m24.textContent = Number(data.stats24h.mints24h).toLocaleString();
+      }
+      if (c24 && data.stats24h.hotCookies24h != null) {
+        c24.textContent = Number(data.stats24h.hotCookies24h).toLocaleString();
+      }
+    }
     const accs = data.accounts || [];
     document.getElementById('stat-accounts').textContent = accs.length;
 
@@ -1179,11 +1512,12 @@ async function refreshStatus() {
 
     const tbody = document.getElementById('accounts-tbody');
     if (accs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);justify-content:center;">暂无账号，请先导入 Cookie</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);justify-content:center;">暂无账号，请先导入 Cookie</td></tr>';
     } else {
       tbody.innerHTML = accs.map(a => \`
         <tr>
           <td data-label="账号 ID"><code>\${a.accountId}</code></td>
+          <td data-label="谷歌账号" title="Gaia ID: \${a.gaiaId || '未知'}">\${a.email ? \`<code>\${a.email}</code>\` : (a.sessionDead ? '<span style="color:var(--muted)">⚠ Cookie 已失效</span>' : '<span style="color:var(--muted)">未探测</span>')}</td>
           <td data-label="等级 (Tier)"><code>\${a.g1Tier || 'TIER0'}</code></td>
           <td data-label="AuthUser">\${a.authUser}</td>
           <td data-label="Cookie 数" title="\${(a.cookieNames || []).join(', ')}">\${a.cookieCount}</td>
@@ -1200,22 +1534,103 @@ async function refreshStatus() {
   } catch (e) {}
 }
 
-async function submitManualCookie() {
-  const raw = document.getElementById('manual-cookie').value.trim();
-  if (!raw) return alert('请粘贴 Cookie 或油猴导出的 JSON');
-  let bodyPayload = { cookies: raw, authUser: 0 };
+let PENDING_IMPORT = null;
+
+function parseImportPayload(raw) {
+  const payload = { cookies: raw, authUser: 0, g1Tier: null };
   if (raw.startsWith('{')) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed.cookies === 'string') {
-        bodyPayload = {
-          cookies: parsed.cookies,
-          authUser: parsed.authUser !== undefined ? Number(parsed.authUser) : 0,
-          g1Tier: parsed.g1Tier || null,
-        };
+        payload.cookies = parsed.cookies;
+        payload.authUser = parsed.authUser !== undefined ? Number(parsed.authUser) : 0;
+        payload.g1Tier = parsed.g1Tier || null;
       }
     } catch {}
   }
+  return payload;
+}
+
+async function submitManualCookie() {
+  const raw = document.getElementById('manual-cookie').value.trim();
+  if (!raw) return alert('请粘贴 Cookie 或油猴导出的 JSON');
+  const autoDetect = !!(document.getElementById('auto-authuser') || {}).checked;
+  const payload = parseImportPayload(raw);
+
+  if (!autoDetect) {
+    return commitImport({ ...payload, authUser: payload.authUser || 0 }, null);
+  }
+
+  // Step 1: probe (测活) every sub-account of this session, then let the user pick.
+  const btn = document.getElementById('import-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '测活中…'; }
+  let accounts = [];
+  try {
+    const res = await fetch('/api/accounts/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookies: payload.cookies, g1Tier: payload.g1Tier }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || '探测失败');
+    accounts = data.accounts || [];
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = '+ 导入并保存'; }
+    return alert('测活失败: ' + err.message);
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '+ 导入并保存'; }
+
+  if (!accounts.length) {
+    return alert('该 Cookie 下没有探测到可用账号（可能已失效）');
+  }
+  PENDING_IMPORT = { payload, accounts };
+  renderImportPicker(accounts);
+}
+
+function renderImportPicker(accounts) {
+  const modal = document.getElementById('import-modal');
+  const list = document.getElementById('import-list');
+  document.getElementById('import-summary').textContent =
+    '共探测到 ' + accounts.length + ' 个可用账号，默认全部勾选：';
+  list.innerHTML = accounts.map((a, i) => \`
+    <label class="import-row">
+      <input type="checkbox" class="import-check" data-idx="\${i}" checked>
+      <span class="import-mail">\${a.email ? a.email : '(未取到邮箱)'}</span>
+      <span class="import-meta">u/\${a.authUser} · <code>\${a.accountId}</code>\${a.overwrite ? ' · <em>覆盖已有</em>' : ''}</span>
+    </label>\`).join('');
+  modal.style.display = 'flex';
+}
+
+function toggleAllImports(checked) {
+  document.querySelectorAll('.import-check').forEach((el) => { el.checked = checked; });
+}
+
+function closeImportPicker() {
+  document.getElementById('import-modal').style.display = 'none';
+  PENDING_IMPORT = null;
+}
+
+async function confirmImport() {
+  if (!PENDING_IMPORT) return;
+  const picked = Array.from(document.querySelectorAll('.import-check'))
+    .filter((el) => el.checked)
+    .map((el) => PENDING_IMPORT.accounts[Number(el.dataset.idx)])
+    .filter(Boolean);
+  if (!picked.length) return alert('请至少选择一个账号');
+  const { payload } = PENDING_IMPORT;
+  closeImportPicker();
+  await commitImport(
+    {
+      ...payload,
+      autoAuthUser: true,
+      authUsers: picked.map((a) => a.authUser),
+      identities: picked.map((a) => ({ authUser: a.authUser, email: a.email, gaiaId: a.gaiaId })),
+    },
+    picked,
+  );
+}
+
+async function commitImport(bodyPayload, picked) {
   const res = await fetch('/api/accounts/add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1226,7 +1641,30 @@ async function submitManualCookie() {
     return alert('导入失败: ' + (data.error || '未知错误'));
   }
   document.getElementById('manual-cookie').value = '';
+  const added = data.accounts || (data.account ? [data.account] : []);
+  const overwritten = added.filter((a) => a.overwrittenAt).length;
+  if (added.length > 1 || (picked && picked.length)) {
+    alert('已导入 ' + added.length + ' 个账号' + (overwritten ? '（其中 ' + overwritten + ' 个覆盖了旧 Cookie，数据已继承）' : ''));
+  }
   refreshStatus();
+}
+
+async function identifyAll() {
+  const btn = document.getElementById('identify-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '探测中…'; }
+  try {
+    const res = await fetch('/api/accounts/identify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      alert('探测失败: ' + (data.error || '未知错误'));
+    } else {
+      const dead = (data.results || []).filter(x => !x.ok);
+      alert('已补全 ' + data.updated + ' 个账号' + (dead.length ? '，' + dead.length + ' 个取不到（Cookie 可能已失效）' : ''));
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔎 补全谷歌账号'; }
+    refreshStatus();
+  }
 }
 
 async function testAcc(accountId) {
