@@ -975,10 +975,10 @@ function renderDashboardHtml({
   apiKey,
   defaultModel = 'gemini-3.8-flash',
   user = null,
-  publicBaseUrl = 'https://aispg.spinsnow.fun',
+  publicBaseUrl = '',
   stats24h = null,
 }) {
-  const cleanPublicBase = String(publicBaseUrl || 'https://aispg.spinsnow.fun').replace(/\/+$/, '');
+  const cleanPublicBase = String(publicBaseUrl || '').replace(/\/+$/, '');
   const userName = user ? escapeHtml(user.globalName || user.username || user.discordId) : '';
   const initMints24h =
     stats24h && stats24h.mints24h != null ? Number(stats24h.mints24h).toLocaleString() : '—';
@@ -1393,7 +1393,7 @@ function toggleTheme() {
 
 let API_KEY = ${JSON.stringify(apiKey)};
 const DEFAULT_MODEL = ${JSON.stringify(defaultModel)};
-const PUBLIC_BASE = ${JSON.stringify(cleanPublicBase)};
+const PUBLIC_BASE = ${JSON.stringify(cleanPublicBase)} || window.location.origin;
 document.getElementById('oai-base-url').textContent = PUBLIC_BASE + '/v1';
 function updateKeyDisplay() {
   document.getElementById('oai-api-key').textContent = API_KEY;
