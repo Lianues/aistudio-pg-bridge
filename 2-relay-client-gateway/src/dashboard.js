@@ -946,6 +946,41 @@ function toggleTheme() {
   document.documentElement.setAttribute('data-theme', next);
   localStorage.setItem('aispg_theme', next);
 }
+async function submitLogin(e) {
+  e.preventDefault();
+  const key = document.getElementById('login-key').value.trim();
+  const errEl = document.getElementById('login-err');
+  const btn = document.getElementById('login-btn');
+  if (!key) {
+    errEl.style.display = 'block';
+    errEl.textContent = '请输入 API Key';
+    return;
+  }
+  errEl.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: key })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      errEl.style.display = 'block';
+      errEl.textContent = data.error || 'API Key 错误';
+      btn.disabled = false;
+      btn.textContent = '验证并进入面板 →';
+      return;
+    }
+    window.location.reload();
+  } catch (err) {
+    errEl.style.display = 'block';
+    errEl.textContent = '网络请求失败: ' + err.message;
+    btn.disabled = false;
+    btn.textContent = '验证并进入面板 →';
+  }
+}
 </script>
 </body>
 </html>`;
@@ -991,7 +1026,7 @@ function renderDashboardHtml({
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>AISPG // 专属中转网关</title>
+<title>${user ? 'AISPG // 专属中转网关' : 'WAA RELAY // 本地中转网关'}</title>
 <style>
   :root {
     --bg: #fafafa;
@@ -1257,18 +1292,18 @@ function renderDashboardHtml({
       <div class="brand">
         <svg class="poly-icon" viewBox="0 0 72 20"><polyline points="2,16 14,16 22,4 32,17 42,8 52,13 60,3 70,3"/></svg>
         <div>
-          <div class="brand-title">AISPG // GATEWAY</div>
-          <div class="brand-sub">
+          <div class="brand-title">${user ? 'AISPG // GATEWAY' : 'WAA // RELAY GATEWAY'}</div>
+          ${stats24h ? `<div class="brand-sub">
             <div>近24h签名总次数：<span id="stat-mints-24h">${initMints24h}</span></div>
             <div>近1h热池cookie数：<span id="stat-hot-cookies-24h">${initHotCookies24h}</span></div>
-          </div>
+          </div>` : ''}
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
         ${userName ? `<span class="pill gray">@${userName}</span>` : ''}
         <span id="overall-badge" class="pill amber">检测中...</span>
         <button class="secondary" onclick="toggleTheme()" style="padding:4px 10px;">◐ 主题</button>
-        ${userName ? `<a class="btn secondary" href="/auth/logout" style="padding:4px 10px;">退出</a>` : ''}
+        <a class="btn secondary" href="${user ? '/auth/logout' : '/logout'}" style="padding:4px 10px;">退出</a>
       </div>
     </div>
     <div class="grid">
@@ -1361,11 +1396,11 @@ function renderDashboardHtml({
       <code class="box" id="gemini-base-url">${cleanPublicBase}/v1beta</code>
     </div>
     <div class="kv-row">
-      <span class="kv-label">专属 API Key:</span>
+      <span class="kv-label">${user ? '专属 API Key:' : 'API Key:'}</span>
       <code class="box" id="oai-api-key">${escapeHtml(apiKey)}</code>
       <div class="kv-actions">
         <button class="secondary" onclick="copyApiKey()">复制 Key</button>
-        <button class="secondary" onclick="regenerateApiKey()">刷新 Key</button>
+        ${user ? '<button class="secondary" onclick="regenerateApiKey()">刷新 Key</button>' : ''}
       </div>
     </div>
     <div class="kv-row">
@@ -1395,6 +1430,8 @@ let API_KEY = ${JSON.stringify(apiKey)};
 const DEFAULT_MODEL = ${JSON.stringify(defaultModel)};
 const PUBLIC_BASE = ${JSON.stringify(cleanPublicBase)} || window.location.origin;
 document.getElementById('oai-base-url').textContent = PUBLIC_BASE + '/v1';
+const geminiBaseEl = document.getElementById('gemini-base-url');
+if (geminiBaseEl) geminiBaseEl.textContent = PUBLIC_BASE + '/v1beta';
 function updateKeyDisplay() {
   document.getElementById('oai-api-key').textContent = API_KEY;
   document.getElementById('curl-example').textContent =
