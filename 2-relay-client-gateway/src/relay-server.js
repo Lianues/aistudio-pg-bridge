@@ -2645,6 +2645,13 @@ function extractRequestAuth(req, body, relayClient, expectedApiKey, url = null) 
 
   const providedToken = extractProvidedApiKey(req, url);
 
+  // 强校验：只要配置了 Key，缺失就一律 401（本机直连也不再例外）。
+  if (expectedApiKey && !providedToken) {
+    const err = new Error('Missing API Key (Authorization: Bearer <key>)');
+    err.httpStatus = 401;
+    throw err;
+  }
+
   if (!cookies && providedToken && (providedToken.includes('SID=') || providedToken.includes('SAPISID='))) {
     cookies = providedToken;
   } else if (expectedApiKey && providedToken && providedToken !== expectedApiKey) {
