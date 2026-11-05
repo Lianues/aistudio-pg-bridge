@@ -988,11 +988,11 @@ async function submitLogin(e) {
 
 // 网页模型清单：包装模式在前，统一带 (防外审截断-) 前缀
 const DASHBOARD_TEXT_MODELS = [
-  'gemini-4-argon(-high)',
-  'gemini-3.8-flash(-high)',
+  'gemini-4-argon(-high/low)',
+  'gemini-3.8-flash(-high/low)',
   'gemini-3.6-flash',
-  'gemini-3.5-flash-lite(-high)',
-  'gemini-3.1-pro-preview(-high)',
+  'gemini-3.5-flash-lite(-high/low)',
+  'gemini-3.1-pro-preview(-high/low)',
 ];
 const DASHBOARD_IMAGE_MODELS = [
   'gemini-nano-banana-2.1',

@@ -2074,7 +2074,9 @@ class WaaRelayClient {
     };
 
     const wireBody = buildGenerateWireBody({
-      model: targetModel,
+      // 传原始模型名（含 -high / -low 后缀）给配置编码器：f1 会被 resolveModelAlias
+      // 归一化，后缀只用于强制 thinkingLevel，避免被用户传入的思考等级覆盖。
+      model: model || targetModel,
       wireContents: resolvedWireContents,
       tools,
       proof: proofPkg.proof,
@@ -2936,13 +2938,17 @@ function createRelayServer(options = {}) {
       const SUPPORTED_MODELS = [
         { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon' },
         { id: 'gemini-4-argon-high', displayName: 'Gemini 4 Argon (High Thinking)' },
+        { id: 'gemini-4-argon-low', displayName: 'Gemini 4 Argon (Low Thinking)' },
         { id: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash' },
         { id: 'gemini-3.8-flash-high', displayName: 'Gemini 3.8 Flash (High Thinking)' },
+        { id: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low Thinking)' },
         { id: 'gemini-3.6-flash', displayName: 'Gemini 3.6 Flash' },
         { id: 'gemini-3.5-flash-lite', displayName: 'Gemini 3.5 Flash Lite' },
         { id: 'gemini-3.5-flash-lite-high', displayName: 'Gemini 3.5 Flash Lite (High Thinking)' },
+        { id: 'gemini-3.5-flash-lite-low', displayName: 'Gemini 3.5 Flash Lite (Low Thinking)' },
         { id: 'gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro Preview' },
         { id: 'gemini-3.1-pro-preview-high', displayName: 'Gemini 3.1 Pro Preview (High Thinking)' },
+        { id: 'gemini-3.1-pro-preview-low', displayName: 'Gemini 3.1 Pro Preview (Low Thinking)' },
         { id: 'gemini-nano-banana-2.1', displayName: 'Nano Banana 2.1' },
         { id: 'gemini-3.1-flash-image', displayName: 'Nano Banana 2 (Gemini 3.1 Flash Image)' },
         { id: 'gemini-3.1-flash-lite-image', displayName: 'Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)' },
