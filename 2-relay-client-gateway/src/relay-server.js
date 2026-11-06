@@ -2047,7 +2047,7 @@ class WaaRelayClient {
         retry403Counts: new Map(),
         retryHtmlCounts: new Map(),
         fromStore: !!fromStore,
-        maxAttempts: fromStore && accountId ? Math.min(this.accountStore.countReady(), 3) : 1,
+        maxAttempts: fromStore && accountId ? Math.max(3, this.accountStore.countReady()) : 1,
       };
 
     const proofPkg = await this.requestProof({
