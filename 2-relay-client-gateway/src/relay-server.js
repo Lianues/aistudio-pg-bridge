@@ -2158,7 +2158,7 @@ class WaaRelayClient {
       const snippet = extractUpstreamHtmlMessage(htmlText);
       const htmlKey = accountId || 'default';
       const countHtml = (state.retryHtmlCounts && state.retryHtmlCounts.get(htmlKey)) || 0;
-      if (countHtml < 2) {
+      if (countHtml < 1) {
         state.retryHtmlCounts.set(htmlKey, countHtml + 1);
         return this.openGenerateStream(
           {
@@ -2171,6 +2171,9 @@ class WaaRelayClient {
           state,
         );
       }
+      // 同一号连拦两次就换号（HTML 拦截页通常是风控/额度，换号往往就过）。
+      const htmlSwitched = this.retryWithNextAccount(state, params, resolvedWireContents, targetModel);
+      if (htmlSwitched) return htmlSwitched;
       const htmlErr = new Error(
         `Google GenerateContent 返回 HTML 错误页（HTTP ${res.status}）：${snippet}`,
       );
@@ -2189,10 +2192,8 @@ class WaaRelayClient {
     if (!res.ok) {
       const rawText = await res.text();
       const regionBlocked = res.status === 403 && rawText.includes('Region not supported');
-      // 401 / permission-403 / 429 / 5xx are retryable on another account.
-      const isRetryable =
-        !regionBlocked &&
-        (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500);
+      // 除 400（请求本身非法，换号也没用）和地区限制外，任何非 2xx 都换号重试。
+      const isRetryable = !regionBlocked && res.status !== 400;
 
       if (isRetryable) {
         // Only rotate cookies on 401 (never on 403 permission errors, which
