@@ -1492,11 +1492,7 @@ function renderTestBadge(accountId) {
   const fullErr = String(r.error || '未知错误');
   const shortErr = fullErr.slice(0, 42).replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const tip = fullErr.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return '<span class="pill err" style="margin-right:6px;cursor:pointer;" title="' + tip + '" onclick="showErrorDetail(\'' + accountId + '\')">ERR · ' + shortErr + (fullErr.length > 42 ? '…' : '') + '</span>';
-}
-
-function escHtml(s) {
-  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return '<span class="pill err" data-err-acc="' + accountId + '" style="margin-right:6px;cursor:pointer;" title="' + tip + '">ERR · ' + shortErr + (fullErr.length > 42 ? '…' : '') + '</span>';
 }
 
 function showErrorDetail(accountId) {
@@ -1510,26 +1506,63 @@ function showErrorDetail(accountId) {
   }
   text = String(text || '未知错误');
   Array.prototype.forEach.call(document.querySelectorAll('#err-modal'), function (el) { el.remove(); });
+
   const wrap = document.createElement('div');
   wrap.id = 'err-modal';
   wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
-  wrap.innerHTML =
-    '<div style="background:var(--surface,#fff);color:var(--fg,#111);border-radius:12px;max-width:760px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.35);border:1px solid var(--border,#e5e7eb);">' +
-      '<div style="padding:13px 16px;border-bottom:1px solid var(--border,#e5e7eb);display:flex;justify-content:space-between;align-items:center;gap:10px;">' +
-        '<strong style="font-size:13px;">测活报错 · ' + escHtml(accountId) + '</strong>' +
-        '<button class="secondary" style="padding:2px 9px;font-size:12px;" onclick="document.getElementById(\'err-modal\').remove()">✕</button>' +
-      '</div>' +
-      '<pre style="margin:0;padding:14px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.55;flex:1;">' + escHtml(text) + '</pre>' +
-      '<div style="padding:10px 16px;border-top:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:10px;">' +
-        '<span style="font-size:11.5px;color:var(--muted,#6b7280);margin-right:auto;">' + text.length + ' 字符</span>' +
-        '<button class="secondary" style="padding:4px 12px;font-size:12px;" onclick="(function(b){navigator.clipboard.writeText(document.querySelector(\'#err-modal pre\').textContent).then(function(){b.textContent=\'已复制\';});})(this)">复制</button>' +
-      '</div>' +
-    '</div>';
+
+  const card = document.createElement('div');
+  card.style.cssText = 'background:var(--surface,#fff);color:var(--fg,#111);border-radius:12px;max-width:760px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.35);border:1px solid var(--border,#e5e7eb);';
+
+  const head = document.createElement('div');
+  head.style.cssText = 'padding:13px 16px;border-bottom:1px solid var(--border,#e5e7eb);display:flex;justify-content:space-between;align-items:center;gap:10px;';
+  const title = document.createElement('strong');
+  title.style.fontSize = '13px';
+  title.textContent = '测活报错 · ' + accountId;
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'secondary';
+  closeBtn.textContent = '✕';
+  closeBtn.style.cssText = 'padding:2px 9px;font-size:12px;';
+  closeBtn.addEventListener('click', function () { wrap.remove(); });
+  head.appendChild(title);
+  head.appendChild(closeBtn);
+
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:0;padding:14px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.55;flex:1;';
+  pre.textContent = text;
+
+  const foot = document.createElement('div');
+  foot.style.cssText = 'padding:10px 16px;border-top:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:10px;';
+  const meta = document.createElement('span');
+  meta.style.cssText = 'font-size:11.5px;color:var(--muted,#6b7280);margin-right:auto;';
+  meta.textContent = text.length + ' 字符';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'secondary';
+  copyBtn.textContent = '复制';
+  copyBtn.style.cssText = 'padding:4px 12px;font-size:12px;';
+  copyBtn.addEventListener('click', function () {
+    navigator.clipboard.writeText(text).then(function () { copyBtn.textContent = '已复制'; });
+  });
+  foot.appendChild(meta);
+  foot.appendChild(copyBtn);
+
+  card.appendChild(head);
+  card.appendChild(pre);
+  card.appendChild(foot);
+  wrap.appendChild(card);
   wrap.addEventListener('click', function (e) { if (e.target === wrap) wrap.remove(); });
   document.addEventListener('keydown', function onEsc(e) {
     if (e.key === 'Escape') { wrap.remove(); document.removeEventListener('keydown', onEsc); }
   });
   document.body.appendChild(wrap);
+}
+
+if (!window.__ERR_MODAL_BOUND__) {
+  window.__ERR_MODAL_BOUND__ = true;
+  document.addEventListener('click', function (e) {
+    const el = e.target && e.target.closest ? e.target.closest('[data-err-acc]') : null;
+    if (el) showErrorDetail(el.getAttribute('data-err-acc'));
+  });
 }
 
 function renderUsageHtml(a) {
@@ -1546,7 +1579,10 @@ async function refreshStatus() {
   try {
     const res = await fetch('/api/status');
     if (res.status === 401) {
-      window.location.reload();
+      if (!window.__AUTH_REDIRECTED__) {
+        window.__AUTH_REDIRECTED__ = true;
+        window.location.href = '/';
+      }
       return;
     }
     const data = await res.json();
