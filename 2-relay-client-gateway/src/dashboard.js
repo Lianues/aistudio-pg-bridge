@@ -1490,79 +1490,13 @@ function renderTestBadge(accountId) {
   }
   if (r.alive) return '<span class="pill green" style="margin-right:6px;">OK · ' + r.elapsedMs + 'ms</span>';
   const fullErr = String(r.error || '未知错误');
-  const shortErr = fullErr.slice(0, 42).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const tip = fullErr.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return '<span class="pill err" data-err-acc="' + accountId + '" style="margin-right:6px;cursor:pointer;" title="' + tip + '">ERR · ' + shortErr + (fullErr.length > 42 ? '…' : '') + '</span>';
-}
-
-function showErrorDetail(accountId) {
-  const r = testResults[accountId] || {};
-  let text = r.error;
-  if (!text) {
-    try {
-      const acc = (window.__ACCS__ || []).find(function (a) { return a.accountId === accountId; });
-      text = acc && acc.lastError;
-    } catch (e) {}
-  }
-  text = String(text || '未知错误');
-  Array.prototype.forEach.call(document.querySelectorAll('#err-modal'), function (el) { el.remove(); });
-
-  const wrap = document.createElement('div');
-  wrap.id = 'err-modal';
-  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
-
-  const card = document.createElement('div');
-  card.style.cssText = 'background:var(--surface,#fff);color:var(--fg,#111);border-radius:12px;max-width:760px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.35);border:1px solid var(--border,#e5e7eb);';
-
-  const head = document.createElement('div');
-  head.style.cssText = 'padding:13px 16px;border-bottom:1px solid var(--border,#e5e7eb);display:flex;justify-content:space-between;align-items:center;gap:10px;';
-  const title = document.createElement('strong');
-  title.style.fontSize = '13px';
-  title.textContent = '测活报错 · ' + accountId;
-  const closeBtn = document.createElement('button');
-  closeBtn.className = 'secondary';
-  closeBtn.textContent = '✕';
-  closeBtn.style.cssText = 'padding:2px 9px;font-size:12px;';
-  closeBtn.addEventListener('click', function () { wrap.remove(); });
-  head.appendChild(title);
-  head.appendChild(closeBtn);
-
-  const pre = document.createElement('pre');
-  pre.style.cssText = 'margin:0;padding:14px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.55;flex:1;';
-  pre.textContent = text;
-
-  const foot = document.createElement('div');
-  foot.style.cssText = 'padding:10px 16px;border-top:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:10px;';
-  const meta = document.createElement('span');
-  meta.style.cssText = 'font-size:11.5px;color:var(--muted,#6b7280);margin-right:auto;';
-  meta.textContent = text.length + ' 字符';
-  const copyBtn = document.createElement('button');
-  copyBtn.className = 'secondary';
-  copyBtn.textContent = '复制';
-  copyBtn.style.cssText = 'padding:4px 12px;font-size:12px;';
-  copyBtn.addEventListener('click', function () {
-    navigator.clipboard.writeText(text).then(function () { copyBtn.textContent = '已复制'; });
-  });
-  foot.appendChild(meta);
-  foot.appendChild(copyBtn);
-
-  card.appendChild(head);
-  card.appendChild(pre);
-  card.appendChild(foot);
-  wrap.appendChild(card);
-  wrap.addEventListener('click', function (e) { if (e.target === wrap) wrap.remove(); });
-  document.addEventListener('keydown', function onEsc(e) {
-    if (e.key === 'Escape') { wrap.remove(); document.removeEventListener('keydown', onEsc); }
-  });
-  document.body.appendChild(wrap);
-}
-
-if (!window.__ERR_MODAL_BOUND__) {
-  window.__ERR_MODAL_BOUND__ = true;
-  document.addEventListener('click', function (e) {
-    const el = e.target && e.target.closest ? e.target.closest('[data-err-acc]') : null;
-    if (el) showErrorDetail(el.getAttribute('data-err-acc'));
-  });
+  const esc = function (s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  const shortErr = esc(fullErr.slice(0, 42)) + (fullErr.length > 42 ? '…' : '');
+  const isOpen = !!(window.__ERR_OPEN__ && window.__ERR_OPEN__[accountId]);
+  return '<details class="errbox" data-err-acc="' + accountId + '"' + (isOpen ? ' open' : '') + ' style="display:inline-block;vertical-align:top;max-width:100%;margin:0 6px 2px 0;">'
+    + '<summary class="pill err" style="cursor:pointer;list-style:none;display:inline-block;">ERR · ' + shortErr + '<span style="opacity:.7;font-size:11px;margin-left:6px;text-decoration:underline;">' + (isOpen ? '收起 ▲' : '点击查看全文 ▾') + '</span></summary>'
+    + '<pre style="margin:6px 0 0;padding:8px 10px;max-width:440px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11.5px;line-height:1.5;border:1px solid var(--border,#e5e7eb);border-radius:8px;background:var(--surface-sub,#f9fafb);color:var(--fg,#111);text-align:left;">' + esc(fullErr) + '</pre>'
+    + '</details>';
 }
 
 function renderUsageHtml(a) {
@@ -1598,6 +1532,17 @@ async function refreshStatus() {
     }
     const accs = data.accounts || [];
     window.__ACCS__ = accs;
+    window.__ERR_OPEN__ = window.__ERR_OPEN__ || {};
+    if (!window.__ERR_TOGGLE_BOUND__) {
+      window.__ERR_TOGGLE_BOUND__ = true;
+      document.addEventListener('toggle', function (ev) {
+        const el = ev.target;
+        if (!el || !el.classList || !el.classList.contains('errbox')) return;
+        const id = el.getAttribute('data-err-acc');
+        if (!id) return;
+        if (el.open) window.__ERR_OPEN__[id] = 1; else delete window.__ERR_OPEN__[id];
+      }, true);
+    }
     document.getElementById('stat-accounts').textContent = accs.length;
 
     const primary = accs[0];
