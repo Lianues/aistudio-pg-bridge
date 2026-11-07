@@ -1489,8 +1489,47 @@ function renderTestBadge(accountId) {
     return '<span class="pill green" style="margin-right:6px;" title="凭证有效（当前模型今日配额已满）">429 OK · ' + r.elapsedMs + 'ms</span>';
   }
   if (r.alive) return '<span class="pill green" style="margin-right:6px;">OK · ' + r.elapsedMs + 'ms</span>';
-  const shortErr = (r.error || '未知错误').slice(0, 42).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return '<span class="pill err" style="margin-right:6px;" title="' + (r.error || '').replace(/"/g, '&quot;') + '">ERR · ' + shortErr + '</span>';
+  const fullErr = String(r.error || '未知错误');
+  const shortErr = fullErr.slice(0, 42).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const tip = fullErr.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return '<span class="pill err" style="margin-right:6px;cursor:pointer;" title="' + tip + '" onclick="showErrorDetail(\'' + accountId + '\')">ERR · ' + shortErr + (fullErr.length > 42 ? '…' : '') + '</span>';
+}
+
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function showErrorDetail(accountId) {
+  const r = testResults[accountId] || {};
+  let text = r.error;
+  if (!text) {
+    try {
+      const acc = (window.__ACCS__ || []).find(function (a) { return a.accountId === accountId; });
+      text = acc && acc.lastError;
+    } catch (e) {}
+  }
+  text = String(text || '未知错误');
+  Array.prototype.forEach.call(document.querySelectorAll('#err-modal'), function (el) { el.remove(); });
+  const wrap = document.createElement('div');
+  wrap.id = 'err-modal';
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;';
+  wrap.innerHTML =
+    '<div style="background:var(--surface,#fff);color:var(--fg,#111);border-radius:12px;max-width:760px;width:100%;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.35);border:1px solid var(--border,#e5e7eb);">' +
+      '<div style="padding:13px 16px;border-bottom:1px solid var(--border,#e5e7eb);display:flex;justify-content:space-between;align-items:center;gap:10px;">' +
+        '<strong style="font-size:13px;">测活报错 · ' + escHtml(accountId) + '</strong>' +
+        '<button class="secondary" style="padding:2px 9px;font-size:12px;" onclick="document.getElementById(\'err-modal\').remove()">✕</button>' +
+      '</div>' +
+      '<pre style="margin:0;padding:14px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.55;flex:1;">' + escHtml(text) + '</pre>' +
+      '<div style="padding:10px 16px;border-top:1px solid var(--border,#e5e7eb);display:flex;align-items:center;gap:10px;">' +
+        '<span style="font-size:11.5px;color:var(--muted,#6b7280);margin-right:auto;">' + text.length + ' 字符</span>' +
+        '<button class="secondary" style="padding:4px 12px;font-size:12px;" onclick="(function(b){navigator.clipboard.writeText(document.querySelector(\'#err-modal pre\').textContent).then(function(){b.textContent=\'已复制\';});})(this)">复制</button>' +
+      '</div>' +
+    '</div>';
+  wrap.addEventListener('click', function (e) { if (e.target === wrap) wrap.remove(); });
+  document.addEventListener('keydown', function onEsc(e) {
+    if (e.key === 'Escape') { wrap.remove(); document.removeEventListener('keydown', onEsc); }
+  });
+  document.body.appendChild(wrap);
 }
 
 function renderUsageHtml(a) {
@@ -1522,6 +1561,7 @@ async function refreshStatus() {
       }
     }
     const accs = data.accounts || [];
+    window.__ACCS__ = accs;
     document.getElementById('stat-accounts').textContent = accs.length;
 
     const primary = accs[0];

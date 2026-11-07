@@ -1679,7 +1679,7 @@ function extractUpstreamHtmlMessage(html) {
   return (
     cleaned ||
     'Google GenerateContent 返回了 HTML 错误页（通常是该模型今日配额已用尽或被边缘风控拦截），请稍后重试或切换其它模型'
-  ).slice(0, 240);
+  ).slice(0, 1500);
 }
 
 function parseMakerSuiteResponse(rawText) {
@@ -2271,7 +2271,7 @@ class WaaRelayClient {
       const upstreamErr = extractUpstreamError(rawText);
       const message = upstreamErr
         ? upstreamErr[1]
-        : rawText.replace(/^\s*/, '').slice(0, 240);
+        : rawText.replace(/^\s*/, '').slice(0, 1500);
       const err = new Error(`Google GenerateContent HTTP ${res.status}: ${message}`);
       err.httpStatus = res.status;
       err.officialError = {
