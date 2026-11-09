@@ -435,6 +435,12 @@ function requestViaHttpProxy(targetUrlStr, options, proxyUrlStr) {
         ALPNProtocols: ['http/1.1'],
       });
 
+      // 注意：https.request 只有在「不传 agent」时才会采用 options.createConnection。
+      // 传 agent: false 会新建一个默认 Agent，createConnection 被忽略 → 请求直接连目标 IP，绕过 CONNECT 隧道。
+      // 必须用自定义 Agent 显式接管连接。
+      const tunnelAgent = new https.Agent({ keepAlive: false });
+      tunnelAgent.createConnection = () => tlsSocket;
+
       const req = https.request(
         {
           host: targetUrl.hostname,
@@ -445,8 +451,7 @@ function requestViaHttpProxy(targetUrlStr, options, proxyUrlStr) {
             ...headers,
             Host: targetUrl.host,
           },
-          agent: false,
-          createConnection: () => tlsSocket,
+          agent: tunnelAgent,
           signal,
         },
         (res) => {
