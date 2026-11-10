@@ -185,6 +185,15 @@ function resolveModelAlias(modelInput, fallback = 'models/gemini-3.8-flash') {
   ) {
     return 'models/gemini-4-argon';
   }
+
+  if (
+    lower === 'carbon' ||
+    lower === '4-carbon' ||
+    lower === 'gemini-4-carbon' ||
+    lower === 'models/gemini-4-carbon'
+  ) {
+    return 'models/gemini-4-carbon';
+  }
   return raw.startsWith('models/') ? raw : `models/${raw}`;
 }
 
