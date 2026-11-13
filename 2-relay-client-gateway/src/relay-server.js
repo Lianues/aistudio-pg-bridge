@@ -1764,7 +1764,7 @@ function parseMakerSuiteResponse(rawText) {
  *   - Plaintext thought summary -> `reasoning_content`
  *   - Answer text -> `content` (`null` when `tool_calls` are present and no text was emitted)
  *   - Function calls -> `tool_calls` (`finish_reason: "tool_calls"`)
- *   - `thoughtSignature` is omitted (auto-bypassed via `skip_thought_signature_validator` on round-trip).
+ *   - `thoughtSignature` -> `tool_calls[].extra_content.google.thought_signature`（Gemini 3/4 回传要求）
  */
 function toOpenAIChatCompletion(parsed, model) {
   const cleanModel = String(model || 'gemini-3.8-flash').replace(/^models\//, '');
@@ -1779,9 +1779,21 @@ function toOpenAIChatCompletion(parsed, model) {
             name: String(fc.name || ''),
             arguments: JSON.stringify(fc.args || {}),
           },
+          // Gemini 3/4：签名要跟着 tool_call 原样回传给客户端，否则下一轮会被要求补签名
+          ...(item.thoughtSignature
+            ? { extra_content: { google: { thought_signature: item.thoughtSignature } } }
+            : {}),
         };
       })
     : null;
+
+  // 纯文本轮的签名：官方建议回传（不强制），OpenAI 兼容层放 message 级 extra_content
+  const textSigEntry =
+    !hasToolCalls && Array.isArray(parsed.thoughtSignatures) && parsed.thoughtSignatures.length > 0
+      ? parsed.thoughtSignatures[parsed.thoughtSignatures.length - 1]
+      : null;
+  const textSigStr =
+    textSigEntry && (typeof textSigEntry === 'string' ? textSigEntry : textSigEntry.signature || null);
 
   return {
     id: `chatcmpl-${crypto.randomBytes(12).toString('hex')}`,
@@ -1796,6 +1808,7 @@ function toOpenAIChatCompletion(parsed, model) {
           content: hasToolCalls && !parsed.text ? null : parsed.text,
           ...(parsed.thought ? { reasoning_content: parsed.thought } : {}),
           ...(toolCalls ? { tool_calls: toolCalls } : {}),
+          ...(textSigStr ? { extra_content: { google: { thought_signature: textSigStr } } } : {}),
         },
         finish_reason: hasToolCalls
           ? 'tool_calls'
@@ -3169,6 +3182,9 @@ function createRelayServer(options = {}) {
                       name: String(fc.name || ''),
                       arguments: JSON.stringify(fc.args || {}),
                     },
+                    ...(item.thoughtSignature
+                      ? { extra_content: { google: { thought_signature: item.thoughtSignature } } }
+                      : {}),
                   };
                 });
                 const toolChunk = {
