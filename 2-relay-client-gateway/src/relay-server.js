@@ -978,6 +978,7 @@ function buildWireContentsFromPayload(payload = {}) {
         if (t) wireParts.push([null, t]);
       }
 
+      let msgSigAttached = false;
       if (hasOpenAiToolCalls) {
         const hasMsgLevelSigList =
           Array.isArray(m.thoughtSignatures) && m.thoughtSignatures.length > 0;
@@ -1009,12 +1010,30 @@ function buildWireContentsFromPayload(payload = {}) {
             parsedArgs = rawArgs;
           }
 
+          // 思考签名一律透传：OpenAI 扩展位 / Gemini 原生位 / 部分客户端塞在 function 或 extra_content 里。
+          // 只有整轮完全没有签名时，才退回官方占位符，避免历史轮校验失败。
+          const msgSigList = Array.isArray(m.thoughtSignatures) ? m.thoughtSignatures : [];
+          const firstMsgSig = msgSigList.length
+            ? typeof msgSigList[0] === 'string'
+              ? msgSigList[0]
+              : (msgSigList[0] && msgSigList[0].signature) || null
+            : null;
           let sigToUse =
             tc.thoughtSignature ||
             tc.thought_signature ||
-            (idx === 0 ? m.thoughtSignature || m.thought_signature : null) ||
+            (tc.extra_content && tc.extra_content.google && tc.extra_content.google.thought_signature) ||
+            (tc.extraContent && tc.extraContent.google && tc.extraContent.google.thought_signature) ||
+            (fn && (fn.thoughtSignature || fn.thought_signature)) ||
+            (idx === 0
+              ? m.thoughtSignature ||
+                m.thought_signature ||
+                (m.extra_content && m.extra_content.google && m.extra_content.google.thought_signature) ||
+                firstMsgSig
+              : null) ||
             null;
-          // OpenAI format drops `thoughtSignature`: inject Google's official bypass token on the first functionCall part
+          if (idx === 0 && firstMsgSig && sigToUse === firstMsgSig) {
+            msgSigAttached = true;
+          }
           if (!sigToUse && idx === 0 && !hasMsgLevelSigList) {
             sigToUse = SKIP_THOUGHT_SIG_VALIDATOR_B64;
           }
@@ -1037,7 +1056,10 @@ function buildWireContentsFromPayload(payload = {}) {
         wireParts.push([null, '']);
       }
       if (Array.isArray(m.thoughtSignatures)) {
-        for (const s of m.thoughtSignatures) {
+        for (let si = 0; si < m.thoughtSignatures.length; si += 1) {
+          // 首个签名已经挂到 functionCall 上了，不要再作为独立 part 重复追加
+          if (msgSigAttached && si === 0) continue;
+          const s = m.thoughtSignatures[si];
           const sigStr = typeof s === 'string' ? s : s && s.signature;
           if (sigStr) wireParts.push(makeSignatureWirePart(sigStr, !!(s && s.thought)));
         }
@@ -2943,6 +2965,9 @@ function createRelayServer(options = {}) {
         { id: 'gemini-4-carbon', displayName: 'Gemini 4 Carbon' },
         { id: 'gemini-4-carbon-high', displayName: 'Gemini 4 Carbon (High Thinking)' },
         { id: 'gemini-4-carbon-low', displayName: 'Gemini 4 Carbon (Low Thinking)' },
+        { id: 'gemini-4-hydrogen', displayName: 'Gemini 4 Hydrogen' },
+        { id: 'gemini-4-hydrogen-high', displayName: 'Gemini 4 Hydrogen (High Thinking)' },
+        { id: 'gemini-4-hydrogen-low', displayName: 'Gemini 4 Hydrogen (Low Thinking)' },
         { id: 'gemini-3.8-flash', displayName: 'Gemini 3.8 Flash' },
         { id: 'gemini-3.8-flash-high', displayName: 'Gemini 3.8 Flash (High Thinking)' },
         { id: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low Thinking)' },

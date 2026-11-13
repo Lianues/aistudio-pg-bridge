@@ -194,6 +194,15 @@ function resolveModelAlias(modelInput, fallback = 'models/gemini-3.8-flash') {
   ) {
     return 'models/gemini-4-carbon';
   }
+
+  if (
+    lower === 'hydrogen' ||
+    lower === '4-hydrogen' ||
+    lower === 'gemini-4-hydrogen' ||
+    lower === 'models/gemini-4-hydrogen'
+  ) {
+    return 'models/gemini-4-hydrogen';
+  }
   return raw.startsWith('models/') ? raw : `models/${raw}`;
 }
 
