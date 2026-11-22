@@ -2168,6 +2168,16 @@ class WaaRelayClient {
         body: wireBody,
       });
     } catch (err) {
+      const causeParts = [];
+      if (err && err.cause) {
+        if (err.cause.code) causeParts.push(`code=${err.cause.code}`);
+        if (err.cause.errno) causeParts.push(`errno=${err.cause.errno}`);
+        if (err.cause.syscall) causeParts.push(`syscall=${err.cause.syscall}`);
+        if (err.cause.address) causeParts.push(`addr=${err.cause.address}`);
+        if (err.cause.message) causeParts.push(err.cause.message);
+      }
+      const detail = causeParts.length > 0 ? ` (${causeParts.join(', ')})` : '';
+      const fullErrMsg = `Google GenerateContent network error: ${err && err.message ? err.message : err}${detail} [${Date.now() - tRpc0}ms]`;
       if (this.accountStore && typeof this.accountStore.recordError === 'function') {
         this.accountStore.recordError({
           accountId: accountId || (minimal.map.size > 0 ? computeAccountId(minimal.map, auth.authUser ?? 0) : null),
@@ -2175,13 +2185,13 @@ class WaaRelayClient {
           model: String(targetModel || '').replace(/^models\//i, ''),
           status: 502,
           source: 'request',
-          message: `Google GenerateContent network error: ${err && err.message ? err.message : err}`,
+          message: fullErrMsg,
         });
       }
       // Network failure is retryable on the next account.
       const switched = this.retryWithNextAccount(state, params, resolvedWireContents, targetModel);
       if (switched) return switched;
-      const netErr = new Error(`Google GenerateContent network error: ${err.message}`);
+      const netErr = new Error(fullErrMsg);
       netErr.httpStatus = 502;
       throw netErr;
     }

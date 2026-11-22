@@ -6,6 +6,28 @@ if (typeof dns.setDefaultResultOrder === 'function') {
   dns.setDefaultResultOrder('ipv4first');
 }
 
+function tuneGlobalFetchDispatcher() {
+  try {
+    // 访问 globalThis.fetch 触发 Node 懒加载内置 undici Dispatcher
+    const _f = globalThis.fetch;
+    if (typeof _f !== 'function') return;
+    const sym = Symbol.for('undici.globalDispatcher.1');
+    const cur = globalThis[sym];
+    if (!cur || typeof cur.constructor !== 'function') return;
+    const Agent = cur.constructor;
+    globalThis[sym] = new Agent({
+      headersTimeout: 900_000,
+      bodyTimeout: 900_000,
+      keepAliveTimeout: 10_000,
+      keepAliveMaxTimeout: 10_000,
+      connect: { family: 4 },
+    });
+  } catch (err) {
+    console.warn('[Relay Gateway] Undici 全局连接池调优失败，回退默认配置:', err && err.message);
+  }
+}
+tuneGlobalFetchDispatcher();
+
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
