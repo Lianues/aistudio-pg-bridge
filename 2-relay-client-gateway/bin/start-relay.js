@@ -8,12 +8,17 @@ if (typeof dns.setDefaultResultOrder === 'function') {
 
 function tuneGlobalFetchDispatcher() {
   try {
-    // 访问 globalThis.fetch 触发 Node 懒加载内置 undici Dispatcher
-    const _f = globalThis.fetch;
-    if (typeof _f !== 'function') return;
+    if (typeof globalThis.fetch !== 'function') return;
     const sym = Symbol.for('undici.globalDispatcher.1');
+    if (!globalThis[sym]) {
+      // 仅读取 globalThis.fetch 不会初始化 dispatcher，必须实际调用一次才会同步挂载
+      globalThis.fetch('http://127.0.0.1:0/').catch(() => {});
+    }
     const cur = globalThis[sym];
-    if (!cur || typeof cur.constructor !== 'function') return;
+    if (!cur || typeof cur.constructor !== 'function') {
+      console.warn('[Relay Gateway] 未获取到 Undici globalDispatcher，跳过超时调优');
+      return;
+    }
     const Agent = cur.constructor;
     globalThis[sym] = new Agent({
       headersTimeout: 900_000,
@@ -22,6 +27,7 @@ function tuneGlobalFetchDispatcher() {
       keepAliveMaxTimeout: 10_000,
       connect: { family: 4 },
     });
+    console.log('[Relay Gateway] Undici 全局连接池已调优 (headersTimeout=900s, bodyTimeout=900s, keepAlive=10s, ipv4)');
   } catch (err) {
     console.warn('[Relay Gateway] Undici 全局连接池调优失败，回退默认配置:', err && err.message);
   }
