@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
+const dns = require('node:dns');
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
